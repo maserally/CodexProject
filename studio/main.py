@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import aiofiles
@@ -16,12 +18,12 @@ from .providers import (
     cached_whisper_models,
     whisper_model_catalog,
 )
-from .runner import UPLOADS_DIR, manager
+from .runner import JOBS_DIR, UPLOADS_DIR, manager
 from .schemas import JobOptions, ModelListRequest
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.1.0")
+app = FastAPI(title="字幕翻译工作室", version="1.2.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 
@@ -134,10 +136,50 @@ def archive_job(job_id: str):
 
 @app.get("/api/jobs/{job_id}/download/{output_key}")
 def download(job_id: str, output_key: str):
+    path = _output_path(job_id, output_key)
+    return FileResponse(path, filename=path.name)
+
+
+def _output_path(job_id: str, output_key: str) -> Path:
     job = manager.get(job_id)
     if not job or output_key not in job.outputs:
         raise HTTPException(status_code=404, detail="产物不存在")
-    path = Path(job.outputs[output_key])
-    if not path.exists():
+    path = Path(job.outputs[output_key]).resolve()
+    job_root = (JOBS_DIR / job_id).resolve()
+    if not path.is_relative_to(job_root):
+        raise HTTPException(status_code=403, detail="产物路径不在任务目录内")
+    if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="产物文件已不存在")
-    return FileResponse(path, filename=path.name)
+    return path
+
+
+def _open_local(path: Path):
+    try:
+        if os.name == "nt":
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"无法调用本机默认程序：{exc}") from exc
+
+
+@app.post("/api/jobs/{job_id}/open/{output_key}")
+def open_output(job_id: str, output_key: str):
+    path = _output_path(job_id, output_key)
+    _open_local(path)
+    return {"ok": True, "path": str(path)}
+
+
+@app.post("/api/jobs/{job_id}/open-folder")
+def open_output_folder(job_id: str):
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    folder = (JOBS_DIR / job_id / "output").resolve()
+    job_root = (JOBS_DIR / job_id).resolve()
+    if not folder.is_relative_to(job_root) or not folder.exists():
+        raise HTTPException(status_code=404, detail="产物文件夹不存在")
+    _open_local(folder)
+    return {"ok": True, "path": str(folder)}

@@ -8,15 +8,26 @@ import torch
 import whisper
 
 
-HALLUCINATIONS = (
-    "ご視聴ありがとうございました",
-    "チャンネル登録",
-    "字幕をご覧いただき",
-    "最後までご覧",
-    "おやすみなさい",
-)
-NONLEXICAL_RE = re.compile(r"^[ぁあぃいうぅえぇえぉおんっッはぁー〜～・]+$")
-PUNCT_ONLY_RE = re.compile(r"^[\s、。！？!?…・〜～ー]+$")
+HALLUCINATIONS = {
+    "ja": (
+        "ご視聴ありがとうございました",
+        "チャンネル登録",
+        "字幕をご覧いただき",
+        "最後までご覧",
+        "おやすみなさい",
+    ),
+    "ko": (
+        "시청해 주셔서 감사합니다",
+        "시청해주셔서 감사합니다",
+        "구독과 좋아요",
+        "자막 제공",
+    ),
+}
+NONLEXICAL_RE = {
+    "ja": re.compile(r"^[ぁあぃいうぅえぇえぉおんっッはぁー〜～・]+$"),
+    "ko": re.compile(r"^[아어오우으음흠하허후아이야앙응엉ㅎㅋㅠㅜㅡ~～·.]+$"),
+}
+PUNCT_ONLY_RE = re.compile(r"^[\s、。！？.!?…・〜～ー]+$")
 
 
 def select_windows(events, threshold=0.15, nonlexical_factor=1.2):
@@ -103,7 +114,7 @@ def map_word_to_original(word, mappings):
 
 
 def repetition_score(text):
-    chars = re.sub(r"[\s、。！？!?…・〜～ー]", "", text)
+    chars = re.sub(r"[\s、。！？.!?…・〜～ー]", "", text)
     if len(chars) < 6:
         return 0.0
     for size in range(1, min(10, len(chars) // 2) + 1):
@@ -118,13 +129,13 @@ def repetition_score(text):
     return 0.0
 
 
-def rejection_reasons(seg):
+def rejection_reasons(seg, language="ja"):
     text = seg["text"].strip()
-    compact = re.sub(r"[\s、。！？!?…・〜～ー]", "", text)
+    compact = re.sub(r"[\s、。！？.!?…・〜～ー]", "", text)
     reasons = []
     if not compact or PUNCT_ONLY_RE.fullmatch(text):
         reasons.append("empty")
-    if any(x in text for x in HALLUCINATIONS):
+    if any(x in text for x in HALLUCINATIONS.get(language, ())):
         reasons.append("known_hallucination")
     if seg["compression_ratio"] > 2.4:
         reasons.append("high_compression")
@@ -132,7 +143,8 @@ def rejection_reasons(seg):
         reasons.append("low_logprob")
     if seg["no_speech_prob"] > 0.72:
         reasons.append("no_speech")
-    if NONLEXICAL_RE.fullmatch(compact or "") and len(compact) <= 30:
+    nonlexical_re = NONLEXICAL_RE.get(language)
+    if nonlexical_re and nonlexical_re.fullmatch(compact or "") and len(compact) <= 30:
         reasons.append("nonlexical_vocalization")
     if repetition_score(text) >= 0.65:
         reasons.append("repetition")
@@ -156,7 +168,7 @@ def dedupe_words(words):
     return output
 
 
-def build_sentences(words):
+def build_sentences(words, language="ja"):
     sentences = []
     current = []
 
@@ -164,14 +176,17 @@ def build_sentences(words):
         nonlocal current
         if not current:
             return
-        text = "".join(w["word"].strip() for w in current).strip()
-        text = re.sub(r"([。！？!?])\1+", r"\1", text)
+        tokens = [w["word"].strip() for w in current if w["word"].strip()]
+        text = (" ".join(tokens) if language == "ko" else "".join(tokens)).strip()
+        if language == "ko":
+            text = re.sub(r"\s+([.!?])", r"\1", text)
+        text = re.sub(r"([。！？.!?])\1+", r"\1", text)
         if text and not PUNCT_ONLY_RE.fullmatch(text):
             sentences.append(
                 {
                     "start": round(max(0, current[0]["start"] - 0.08), 3),
                     "end": round(current[-1]["end"] + 0.14, 3),
-                    "ja": text,
+                    "source": text,
                     "mean_word_probability": round(
                         sum(w.get("probability", 0.5) for w in current) / len(current), 6
                     ),
@@ -189,7 +204,7 @@ def build_sentences(words):
         current.append(word)
         token = word["word"].strip()
         duration = current[-1]["end"] - current[0]["start"]
-        if re.search(r"[。！？!?]$", token) and duration >= 0.75:
+        if re.search(r"[。！？.!?]$", token) and duration >= 0.75:
             flush()
     flush()
     return sentences
@@ -201,6 +216,7 @@ def main():
     ap.add_argument("--events", required=True)
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--model", default="medium")
+    ap.add_argument("--language", choices=("ja", "ko"), default="ja")
     ap.add_argument("--speech-threshold", type=float, default=0.15)
     ap.add_argument("--nonlexical-factor", type=float, default=1.2)
     args = ap.parse_args()
@@ -234,7 +250,7 @@ def main():
             clip[target_start:target_end] = source[: target_end - target_start]
         result = model.transcribe(
             clip,
-            language="ja",
+            language=args.language,
             task="transcribe",
             fp16=torch.cuda.is_available(),
             temperature=0,
@@ -252,7 +268,7 @@ def main():
             absolute["event_nonlexical_score"] = max(
                 m["nonlexical_score"] for m in pack["mappings"]
             )
-            absolute["rejection_reasons"] = rejection_reasons(absolute)
+            absolute["rejection_reasons"] = rejection_reasons(absolute, args.language)
             absolute_words = []
             for word in seg.get("words", []):
                 mapped = map_word_to_original(word, pack["mappings"])
@@ -276,8 +292,8 @@ def main():
         json.dumps(candidates, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     words = dedupe_words(accepted_words)
-    sentences = build_sentences(words)
-    (workdir / "ja_sentences.json").write_text(
+    sentences = build_sentences(words, args.language)
+    (workdir / "source_sentences.json").write_text(
         json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(

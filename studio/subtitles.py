@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .languages import language_info, source_text
+
 
 def srt_ts(seconds: float) -> str:
     millis = max(0, int(round(seconds * 1000)))
@@ -24,24 +26,31 @@ def wrap_cn(text: str, width: int = 22) -> str:
     return text[:cut].rstrip() + "\n" + text[cut:].lstrip()
 
 
-def write_subtitles(cues: list[dict[str, Any]], output_dir: Path, stem: str, suffix: str):
+def write_subtitles(
+    cues: list[dict[str, Any]],
+    output_dir: Path,
+    stem: str,
+    suffix: str,
+    source_language: str = "ja",
+):
     output_dir.mkdir(parents=True, exist_ok=True)
+    language = language_info(source_language)
     cn = output_dir / f"{stem}_中文字幕_{suffix}.srt"
-    bi = output_dir / f"{stem}_中日双语_{suffix}.srt"
-    ja = output_dir / f"{stem}_日文字幕_{suffix}.srt"
+    bi = output_dir / f"{stem}_{language['bilingual_subtitle']}_{suffix}.srt"
+    source_srt = output_dir / f"{stem}_{language['source_subtitle']}_{suffix}.srt"
     data = output_dir / f"{stem}_字幕数据_{suffix}.json"
     data.write_text(json.dumps(cues, ensure_ascii=False, indent=2), encoding="utf-8")
     with cn.open("w", encoding="utf-8-sig") as f_cn, \
          bi.open("w", encoding="utf-8-sig") as f_bi, \
-         ja.open("w", encoding="utf-8-sig") as f_ja:
+         source_srt.open("w", encoding="utf-8-sig") as f_source:
         for index, row in enumerate(cues, 1):
             timeline = f"{srt_ts(row['start'])} --> {srt_ts(row['end'])}"
             f_cn.write(f"{index}\n{timeline}\n{wrap_cn(row.get('zh', ''))}\n\n")
             f_bi.write(
-                f"{index}\n{timeline}\n{wrap_cn(row.get('zh', ''))}\n{row.get('ja', '')}\n\n"
+                f"{index}\n{timeline}\n{wrap_cn(row.get('zh', ''))}\n{source_text(row)}\n\n"
             )
-            f_ja.write(f"{index}\n{timeline}\n{row.get('ja', '')}\n\n")
-    return {"cn_srt": cn, "bilingual_srt": bi, "ja_srt": ja, "json": data}
+            f_source.write(f"{index}\n{timeline}\n{source_text(row)}\n\n")
+    return {"cn_srt": cn, "bilingual_srt": bi, "source_srt": source_srt, "json": data}
 
 
 def mux_soft_subtitles(media: Path, subtitle: Path, output: Path, title: str = "简体中文"):

@@ -34,7 +34,14 @@
     </section>
 
     <section class="panel">
-      <h2>2. 质量策略</h2>
+      <h2>2. 语言与质量策略</h2>
+      <label class="language-picker">源语言
+        <select id="source-language">
+          <option value="ja">日语</option>
+          <option value="ko">韩语</option>
+        </select>
+        <small class="field-help">识别所选语言，并翻译为简体中文</small>
+      </label>
       <div class="profile-grid">
         <label class="profile"><input type="radio" name="profile" value="precision"><b>高精度</b><span>最大限度抑制喘息幻听，可能漏掉低声对白</span></label>
         <label class="profile selected"><input type="radio" name="profile" value="balanced" checked><b>均衡</b><span>推荐：长空白二次召回必须通过双模型一致</span></label>
@@ -51,7 +58,7 @@
 
     <section class="columns">
       <div class="panel provider" id="asr-panel">
-        <h2>3. 日语识别模型</h2>
+        <h2 id="asr-title">3. 日语识别模型</h2>
         <label>提供方
           <select id="asr-kind"><option value="local_whisper">本地 Whisper</option><option value="openai_compatible">OpenAI 兼容接口</option></select>
           <small class="field-help">本地 Whisper 不发送音频到网络；兼容接口适合使用云端或局域网 ASR 服务</small>
@@ -60,7 +67,7 @@
           <label>Base URL<input id="asr-url" value="https://api.openai.com/v1"><small class="field-help">服务根地址，可填到域名或 /v1；软件会自动补齐 /v1</small></label>
           <label>API Key<input id="asr-key" type="password" autocomplete="off"><small class="field-help">仅用于当前进程请求，不保存到任务记录</small></label>
         </div>
-        <label>识别模型<div class="model-row"><select id="asr-model"></select><button type="button" id="refresh-asr">刷新模型</button></div><input id="asr-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="asr-model-help" class="field-help">medium：默认主识别模型，速度与日语准确率较均衡</small></label>
+        <label>识别模型<div class="model-row"><select id="asr-model"></select><button type="button" id="refresh-asr">刷新模型</button></div><input id="asr-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="asr-model-help" class="field-help">medium：默认主识别模型，速度与准确率较均衡</small></label>
         <div id="installed-whisper" class="model-status">正在读取本机模型…</div>
         <label>本地复核模型<select id="verifier-model"></select><small id="verifier-model-help" class="field-help">只复核初筛后的对白；large-v3 更准确但更占显存，不会全片重复识别</small></label>
       </div>
@@ -75,7 +82,7 @@
         <div class="remote-fields hidden" data-for="translator">
           <label>API Key<input id="translator-key" type="password" autocomplete="off"><small class="field-help">只在当前任务中使用，任务状态文件中会被清空</small></label>
         </div>
-        <label>翻译模型<div class="model-row"><select id="translator-model"></select><button type="button" id="refresh-translator">刷新模型</button></div><input id="translator-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="translator-model-help" class="field-help">逐句日译中，并额外审计“不要、等一下、没听说”等高风险语义</small></label>
+        <label>翻译模型<div class="model-row"><select id="translator-model"></select><button type="button" id="refresh-translator">刷新模型</button></div><input id="translator-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="translator-model-help" class="field-help">逐句翻译为中文，并额外审计否定、制止和等待等高风险语义</small></label>
       </div>
     </section>
 

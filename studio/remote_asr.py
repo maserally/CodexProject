@@ -9,13 +9,10 @@ from typing import Any, Callable
 import numpy as np
 import whisper
 
-from asr_stage import pack_windows, select_windows
+from asr_stage import HALLUCINATIONS, pack_windows, select_windows
 
 from .providers import OpenAICompatibleProvider
 from .schemas import ProviderSettings
-
-
-HALLUCINATIONS = ("ご視聴ありがとうございました", "チャンネル登録", "字幕をご覧いただき")
 
 
 def _write_wav(path: Path, audio: np.ndarray):
@@ -36,7 +33,7 @@ def _mapping(midpoint: float, mappings: list[dict[str, Any]]):
 
 
 def _split_segment(row: dict[str, Any]):
-    parts = [x for x in re.split(r"(?<=[。！？!?])", row["ja"]) if x.strip()]
+    parts = [x for x in re.split(r"(?<=[。！？.!?])", row["source"]) if x.strip()]
     if len(parts) <= 1:
         return [row]
     total = sum(max(1, len(x)) for x in parts)
@@ -45,7 +42,7 @@ def _split_segment(row: dict[str, Any]):
     output = []
     for index, part in enumerate(parts):
         end = row["end"] if index == len(parts) - 1 else cursor + duration * len(part) / total
-        output.append({**row, "start": cursor, "end": end, "ja": part.strip()})
+        output.append({**row, "start": cursor, "end": end, "source": part.strip()})
         cursor = end
     return output
 
@@ -86,7 +83,9 @@ def run_remote_asr(
             text = str(segment.get("text", "")).strip()
             midpoint = (float(segment.get("start", 0)) + float(segment.get("end", 0))) / 2
             mapping = _mapping(midpoint, pack["mappings"])
-            if not mapping or not text or any(x in text for x in HALLUCINATIONS):
+            if not mapping or not text or any(
+                x in text for x in HALLUCINATIONS.get(language, ())
+            ):
                 continue
             start = mapping["original_start"] + max(0, float(segment["start"]) - mapping["packed_start"])
             end = mapping["original_start"] + min(
@@ -99,7 +98,7 @@ def run_remote_asr(
                         {
                             "start": round(start, 3),
                             "end": round(end, 3),
-                            "ja": text,
+                            "source": text,
                             "mean_word_probability": 0.9,
                             "source": "openai_compatible_asr",
                         }
@@ -108,10 +107,10 @@ def run_remote_asr(
         if progress:
             progress(batch_index, len(packs), f"远程转写批次 {batch_index}/{len(packs)}")
     rows.sort(key=lambda x: (x["start"], x["end"]))
-    (workdir / "ja_sentences.json").write_text(
+    (workdir / "source_sentences.json").write_text(
         json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (workdir / "ja_final.json").write_text(
+    (workdir / "source_final.json").write_text(
         json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return rows

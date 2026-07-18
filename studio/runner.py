@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .languages import language_info
 from .quality import PROFILE_SETTINGS, finalize_cues, quality_summary
 from .recall import (
     accepted_recovery_rows,
@@ -212,6 +213,7 @@ class JobManager:
         raw_stem = options.output_name.strip() or media.stem
         stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", raw_stem).strip(" .") or "subtitle_output"
         profile = PROFILE_SETTINGS[options.profile]
+        language = language_info(options.source_language)
         python = sys.executable
         duration = self.media_duration(media)
         self.update(job, status="running", stage="声音活动检测", progress=0.03, log=f"视频时长 {duration:.2f} 秒")
@@ -233,13 +235,14 @@ class JobManager:
         )
         events = json.loads(events_path.read_text(encoding="utf-8"))
 
-        self.update(job, stage="日语语音识别", progress=0.25)
+        self.update(job, stage=f"{language['name']}语音识别", progress=0.25)
         if options.asr.kind == "local_whisper":
             self.run_command(
                 job,
                 [
                     python, str(ROOT / "asr_stage.py"), str(media), "--events", str(events_path),
                     "--workdir", str(workdir), "--model", options.asr.model,
+                    "--language", options.source_language,
                     "--speech-threshold", str(profile["speech_threshold"]),
                     "--nonlexical-factor", str(profile["nonlexical_factor"]),
                 ],
@@ -260,20 +263,21 @@ class JobManager:
         else:
             raise ValueError(f"不支持的 ASR 提供方：{options.asr.kind}")
 
-        ja_source = workdir / "ja_sentences.json"
-        initial_ja = json.loads(ja_source.read_text(encoding="utf-8"))
-        if initial_ja and options.verifier_model and options.verifier_model != options.asr.model:
+        source_path = workdir / "source_sentences.json"
+        initial_source = json.loads(source_path.read_text(encoding="utf-8"))
+        if initial_source and options.verifier_model and options.verifier_model != options.asr.model:
             self.update(job, stage="第二模型复核", progress=0.46)
             self.run_command(
                 job,
                 [
-                    python, str(ROOT / "large_review.py"), str(media), "--medium", str(ja_source),
+                    python, str(ROOT / "large_review.py"), str(media), "--medium", str(source_path),
                     "--workdir", str(workdir), "--model", options.verifier_model,
+                    "--language", options.source_language,
                 ],
             )
-            primary_path = workdir / "ja_final.json"
+            primary_path = workdir / "source_final.json"
         else:
-            primary_path = ja_source
+            primary_path = source_path
         primary = json.loads(primary_path.read_text(encoding="utf-8"))
 
         recovered_count = 0
@@ -303,20 +307,24 @@ class JobManager:
                     [
                         python, str(ROOT / "asr_stage.py"), str(media), "--events", str(recovery_events_path),
                         "--workdir", str(recovery_root), "--model", options.asr.model,
+                        "--language", options.source_language,
                         "--speech-threshold", str(profile["recovery_threshold"]),
                         "--nonlexical-factor", str(max(1.0, profile["nonlexical_factor"] - 0.1)),
                     ],
                 )
-                recovery_medium = recovery_root / "ja_sentences.json"
+                recovery_medium = recovery_root / "source_sentences.json"
                 if json.loads(recovery_medium.read_text(encoding="utf-8")):
                     self.run_command(
                         job,
                         [
                             python, str(ROOT / "large_review.py"), str(media), "--medium", str(recovery_medium),
                             "--workdir", str(recovery_root), "--model", options.verifier_model,
+                            "--language", options.source_language,
                         ],
                     )
-                    recovery_final = json.loads((recovery_root / "ja_final.json").read_text(encoding="utf-8"))
+                    recovery_final = json.loads(
+                        (recovery_root / "source_final.json").read_text(encoding="utf-8")
+                    )
                     comparisons = json.loads(
                         (recovery_root / "model_comparison.json").read_text(encoding="utf-8")
                     )
@@ -333,6 +341,8 @@ class JobManager:
             lambda current, total, _: self.update(
                 job, progress=0.70 + 0.16 * current / max(1, total), log=(f"翻译 {current}/{total}" if current % 10 == 0 else None)
             ),
+            source_language=options.source_language,
+            target_language=options.target_language,
         )
         review_cues = finalize_cues(
             translated,
@@ -346,8 +356,12 @@ class JobManager:
             remove_periods=options.remove_chinese_periods,
             publish=True,
         )
-        review_files = write_subtitles(review_cues, output_dir, stem, "高置信校对版")
-        publish_files = write_subtitles(publish_cues, output_dir, stem, "观看版")
+        review_files = write_subtitles(
+            review_cues, output_dir, stem, "高置信校对版", options.source_language
+        )
+        publish_files = write_subtitles(
+            publish_cues, output_dir, stem, "观看版", options.source_language
+        )
         final_cues = publish_cues if options.publish_mode else review_cues
         final_files = publish_files if options.publish_mode else review_files
 
@@ -355,6 +369,7 @@ class JobManager:
         summary["profile"] = options.profile
         summary["recovered_cues"] = recovered_count
         summary["input_duration"] = duration
+        summary["source_language"] = language["name"]
         report_path = output_dir / f"{stem}_自动质量报告.md"
         report_path.write_text(self.quality_report(summary), encoding="utf-8")
 
@@ -388,6 +403,7 @@ class JobManager:
         ) or "- 无超过 30 秒的空白区间"
         return f"""# 自动字幕质量报告
 
+- 源语言：{summary['source_language']}
 - 策略：{summary['profile']}
 - 字幕条数：{summary['cue_count']}
 - 字幕显示总时长：{summary['display_seconds']} 秒

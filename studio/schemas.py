@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 ProviderKind = Literal["local_whisper", "local_ollama", "openai_compatible"]
 QualityProfile = Literal["precision", "balanced", "recall"]
+SourceLanguage = Literal["ja", "ko"]
 
 
 class ProviderSettings(BaseModel):
@@ -17,8 +18,8 @@ class ProviderSettings(BaseModel):
 class JobOptions(BaseModel):
     input_path: str
     output_name: str = ""
-    source_language: str = "ja"
-    target_language: str = "zh-CN"
+    source_language: SourceLanguage = "ja"
+    target_language: Literal["zh-CN"] = "zh-CN"
     profile: QualityProfile = "balanced"
     asr: ProviderSettings = Field(
         default_factory=lambda: ProviderSettings(kind="local_whisper", model="medium")

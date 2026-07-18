@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .languages import source_text
+
 
 PROFILE_SETTINGS = {
     "precision": {
@@ -67,7 +69,8 @@ def finalize_cues(
             combined_len = len(row.get("zh", "")) + len(nxt.get("zh", ""))
             if gap <= 0.18 and combined_len <= 24:
                 row["end"] = nxt["end"]
-                row["ja"] = (row.get("ja", "") + nxt.get("ja", "")).strip()
+                row["source"] = (source_text(row) + source_text(nxt)).strip()
+                row.pop("ja", None)
                 row["zh"] = (row.get("zh", "") + "，" + nxt.get("zh", "")).strip("，")
                 index += 1
         merged.append(row)

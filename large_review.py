@@ -9,6 +9,7 @@ import torch
 import whisper
 
 from asr_stage import pack_windows, rejection_reasons
+from studio.languages import source_text
 
 
 def merge_review_windows(sentences):
@@ -31,7 +32,7 @@ def merge_review_windows(sentences):
 
 
 def normalize(text):
-    return re.sub(r"[\s、。！？!?…・〜～ー]", "", text)
+    return re.sub(r"[\s、。！？.!?…・〜～ー]", "", text)
 
 
 def similarity(a, b):
@@ -50,7 +51,7 @@ def mapping_for_midpoint(midpoint, mappings):
 
 
 def split_text_segment(row):
-    parts = [x for x in re.split(r"(?<=[。！？!?])", row["ja"]) if x.strip()]
+    parts = [x for x in re.split(r"(?<=[。！？.!?])", source_text(row)) if x.strip()]
     if len(parts) <= 1:
         return [row]
     total_chars = sum(max(1, len(normalize(x))) for x in parts)
@@ -60,7 +61,7 @@ def split_text_segment(row):
     for index, part in enumerate(parts):
         fraction = max(1, len(normalize(part))) / total_chars
         end = row["end"] if index == len(parts) - 1 else cursor + duration * fraction
-        output.append({**row, "start": round(cursor, 3), "end": round(end, 3), "ja": part.strip()})
+        output.append({**row, "start": round(cursor, 3), "end": round(end, 3), "source": part.strip()})
         cursor = end
     return output
 
@@ -71,6 +72,7 @@ def main():
     ap.add_argument("--medium", required=True)
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--model", default="large-v3")
+    ap.add_argument("--language", choices=("ja", "ko"), default="ja")
     args = ap.parse_args()
     workdir = Path(args.workdir)
     medium = json.loads(Path(args.medium).read_text(encoding="utf-8"))
@@ -97,7 +99,7 @@ def main():
             clip[target_start:target_end] = source[: target_end - target_start]
         result = model.transcribe(
             clip,
-            language="ja",
+            language=args.language,
             task="transcribe",
             fp16=torch.cuda.is_available(),
             temperature=0,
@@ -119,14 +121,16 @@ def main():
             row = {
                 "start": round(max(mapping["original_start"], absolute_start), 3),
                 "end": round(min(mapping["original_end"], absolute_end), 3),
-                "ja": seg["text"].strip(),
+                "source": seg["text"].strip(),
                 "avg_logprob": seg["avg_logprob"],
                 "no_speech_prob": seg["no_speech_prob"],
                 "compression_ratio": seg["compression_ratio"],
                 "batch": batch_index,
             }
-            row["rejection_reasons"] = rejection_reasons({**seg, "text": row["ja"]})
-            if row["end"] > row["start"] and row["ja"]:
+            row["rejection_reasons"] = rejection_reasons(
+                {**seg, "text": row["source"]}, args.language
+            )
+            if row["end"] > row["start"] and row["source"]:
                 large_rows.append(row)
         print(f"large-v3 {batch_index}/{len(packs)}", flush=True)
 
@@ -149,16 +153,16 @@ def main():
     comparisons = []
     for row in accepted_large:
         medium_text = "".join(
-            x["ja"] for x in medium
+            source_text(x) for x in medium
             if min(row["end"], x["end"]) - max(row["start"], x["start"]) > 0.1
         )
         comparisons.append(
             {
                 "start": row["start"],
                 "end": row["end"],
-                "large_v3": row["ja"],
+                "large_v3": source_text(row),
                 "medium": medium_text,
-                "similarity": round(similarity(row["ja"], medium_text), 6),
+                "similarity": round(similarity(source_text(row), medium_text), 6),
             }
         )
 
@@ -168,7 +172,7 @@ def main():
     (workdir / "model_comparison.json").write_text(
         json.dumps(comparisons, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (workdir / "ja_final.json").write_text(
+    (workdir / "source_final.json").write_text(
         json.dumps(filled, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(
