@@ -7,6 +7,60 @@ from typing import Any
 from .quality import find_gaps
 
 
+def _subtract_intervals(start: float, end: float, blockers: list[tuple[float, float]]):
+    pieces = [(start, end)]
+    for block_start, block_end in blockers:
+        next_pieces = []
+        for piece_start, piece_end in pieces:
+            if block_end <= piece_start or block_start >= piece_end:
+                next_pieces.append((piece_start, piece_end))
+                continue
+            if block_start > piece_start:
+                next_pieces.append((piece_start, min(piece_end, block_start)))
+            if block_end < piece_end:
+                next_pieces.append((max(piece_start, block_end), piece_end))
+        pieces = next_pieces
+    return pieces
+
+
+def vad_fallback_events_for_gaps(
+    vad_segments: list[dict[str, Any]],
+    gaps: list[dict[str, float]],
+    existing_events: list[dict[str, Any]],
+    min_duration: float = 0.24,
+):
+    """Return VAD-confirmed pieces in long gaps not already reviewed by the event gate."""
+    blockers = sorted((float(x["start"]), float(x["end"])) for x in existing_events)
+    output = []
+    for segment in vad_segments:
+        for gap in gaps:
+            start = max(float(segment["start"]), float(gap["start"]))
+            end = min(float(segment["end"]), float(gap["end"]))
+            if end - start < min_duration:
+                continue
+            for piece_start, piece_end in _subtract_intervals(start, end, blockers):
+                if piece_end - piece_start < min_duration:
+                    continue
+                output.append(
+                    {
+                        "start": round(piece_start, 3),
+                        "end": round(piece_end, 3),
+                        "speech_score": 1.0,
+                        "nonlexical_score": 0.0,
+                        "speech_margin": 1.0,
+                        "source": "vad_gap_fallback",
+                    }
+                )
+    output.sort(key=lambda x: (x["start"], x["end"]))
+    merged = []
+    for row in output:
+        if merged and row["start"] <= merged[-1]["end"] + 0.05:
+            merged[-1]["end"] = max(merged[-1]["end"], row["end"])
+        else:
+            merged.append(dict(row))
+    return merged
+
+
 def filter_events_for_gaps(
     events: list[dict[str, Any]],
     gaps: list[dict[str, float]],

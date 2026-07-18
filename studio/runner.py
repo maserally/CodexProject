@@ -20,6 +20,7 @@ from .recall import (
     filter_events_for_gaps,
     merge_recovery,
     save_gap_audit,
+    vad_fallback_events_for_gaps,
 )
 from .remote_asr import run_remote_asr
 from .schemas import JobOptions
@@ -223,6 +224,7 @@ class JobManager:
             job,
             [python, str(ROOT / "vad_scan.py"), str(media), "--output", str(vad_path), "--mode", "3"],
         )
+        vad_segments = json.loads(vad_path.read_text(encoding="utf-8"))
 
         events_path = workdir / "event_segments.json"
         self.update(job, stage="喘息与语音分类", progress=0.12)
@@ -281,6 +283,7 @@ class JobManager:
         primary = json.loads(primary_path.read_text(encoding="utf-8"))
 
         recovered_count = 0
+        vad_fallback_count = 0
         initial_gaps = save_gap_audit(workdir / "gaps_before_recovery.json", primary, duration)
         if (
             options.enable_gap_recovery
@@ -294,8 +297,23 @@ class JobManager:
                 profile["recovery_threshold"],
                 profile["nonlexical_factor"],
             )
+            if profile.get("vad_gap_fallback"):
+                fallback_events = vad_fallback_events_for_gaps(
+                    vad_segments, initial_gaps, recovery_events
+                )
+                vad_fallback_count = len(fallback_events)
+                recovery_events.extend(fallback_events)
+                recovery_events.sort(key=lambda x: (x["start"], x["end"]))
             if recovery_events:
-                self.update(job, stage="长空白二次召回", progress=0.57, log=f"临界声音窗口 {len(recovery_events)} 个")
+                self.update(
+                    job,
+                    stage="长空白二次召回",
+                    progress=0.57,
+                    log=(
+                        f"召回窗口 {len(recovery_events)} 个，"
+                        f"其中 VAD 兜底 {vad_fallback_count} 个"
+                    ),
+                )
                 recovery_root = workdir / "recovery"
                 recovery_root.mkdir(exist_ok=True)
                 recovery_events_path = recovery_root / "events.json"
@@ -331,8 +349,9 @@ class JobManager:
                     accepted = accepted_recovery_rows(
                         recovery_final, comparisons, profile["consensus_threshold"]
                     )
-                    recovered_count = len(accepted)
+                    before_recovery = len(primary)
                     primary = merge_recovery(primary, accepted)
+                    recovered_count = len(primary) - before_recovery
 
         self.update(job, stage="逐句翻译与否定词审计", progress=0.70)
         translated = translate_cues(
@@ -365,11 +384,24 @@ class JobManager:
         final_cues = publish_cues if options.publish_mode else review_cues
         final_files = publish_files if options.publish_mode else review_files
 
-        summary = quality_summary(final_cues, duration)
+        summary = quality_summary(final_cues, duration, activity_segments=vad_segments)
         summary["profile"] = options.profile
         summary["recovered_cues"] = recovered_count
+        summary["vad_fallback_segments"] = vad_fallback_count
         summary["input_duration"] = duration
         summary["source_language"] = language["name"]
+        warning_items = [
+            {
+                "start": float(row["start"]),
+                "source": row.get("source", ""),
+                "zh": row.get("zh", ""),
+                "warnings": row.get("translation_warnings", []),
+            }
+            for row in translated
+            if row.get("translation_warnings")
+        ]
+        summary["translation_warning_count"] = len(warning_items)
+        summary["translation_warning_items"] = warning_items[:100]
         report_path = output_dir / f"{stem}_自动质量报告.md"
         report_path.write_text(self.quality_report(summary), encoding="utf-8")
 
@@ -398,9 +430,15 @@ class JobManager:
     @staticmethod
     def quality_report(summary: dict[str, Any]):
         gaps = "\n".join(
-            f"- {x['start']:.2f} ～ {x['end']:.2f}（{x['duration']:.2f} 秒）"
+            f"- {x['start']:.2f} ～ {x['end']:.2f}（{x['duration']:.2f} 秒，"
+            f"其中 VAD 活动 {x.get('activity_seconds', 0):.2f} 秒）"
             for x in summary["long_gaps"]
         ) or "- 无超过 30 秒的空白区间"
+        warnings = "\n".join(
+            f"- {x['start']:.2f} 秒｜原文：{x['source']}｜译文：{x['zh']}｜"
+            f"原因：{'；'.join(x['warnings'])}"
+            for x in summary.get("translation_warning_items", [])
+        ) or "- 无"
         return f"""# 自动字幕质量报告
 
 - 源语言：{summary['source_language']}
@@ -411,17 +449,24 @@ class JobManager:
 - 恰好 2 秒：{summary['exact_two_seconds']} 条
 - 时间轴重叠：{summary['overlaps']} 处
 - 未确认占位符：{summary['placeholders']} 处
+- 翻译审计警告：{summary['translation_warning_count']} 条（校对版以“【需校对】”标出）
 - 中文字幕句号：{summary['chinese_periods']} 个
 - 长空白二次召回：补回 {summary['recovered_cues']} 条
+- VAD 长空白兜底：复查 {summary['vad_fallback_segments']} 段
+- VAD 活动覆盖率：{summary['activity_coverage_percent']}%
 - 最长空白：{summary['longest_gap']} 秒
 
 ## 超过 30 秒的空白区间
 
 {gaps}
 
+## 需要人工校对的译文
+
+{warnings}
+
 ## 解释
 
-长空白不等于漏识别：可能是静音、喘息、呻吟、水声或没有语言的信息。本报告列出它们供复核；自动补回只接受声音事件门控和双模型一致性同时通过的片段。
+长空白不等于漏识别：可能是静音、喘息、呻吟、水声或没有语言的信息。本报告同时显示空白区里的 VAD 活动时长，便于判断漏识别风险。常规补回经过声音事件门控；VAD 兜底仅在长空白区复查门控漏掉的活动片段，两者都必须通过双模型一致性检查后才能进入字幕。
 """
 
 

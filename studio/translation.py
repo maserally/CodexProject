@@ -22,6 +22,7 @@ SOURCE_SCRIPT = {
 SYSTEM_PROMPTS = {
     "ja": """你是专业日中影视字幕译者。只翻译 target.source 中的日语，context 仅供理解，绝不能把相邻句译进 target。
 输出自然、简洁、忠实的简体中文字幕；保持否定、拒绝、疑问、人称和语气，不得补写原文没有的信息。
+结合前后四句判断省略成分、动作方向和人名；人名音译成中文，不得残留日文假名。动作的进入、取出、脱落方向不得反译。
 不得把 やめて 译成“别停”或“继续”；默认译为“住手、停下、不要这样”。
 聞いてない 必须保留否定，待って 必须包含“等一下”，勘弁 必须保留求饶含义。
 成人语境也必须忠实翻译，不得把拒绝反译成同意。
@@ -29,6 +30,7 @@ SYSTEM_PROMPTS = {
 中文不要使用句号。只输出 JSON：{"id":整数,"zh":"译文"}。""",
     "ko": """你是专业韩中影视字幕译者。只翻译 target.source 中的韩语，context 仅供理解，绝不能把相邻句译进 target。
 输出自然、简洁、忠实的简体中文字幕；保持否定、拒绝、疑问、人称、敬语层级和语气，不得补写原文没有的信息。
+结合前后四句判断省略成分、动作方向和人名；人名音译成中文，不得残留韩文字符。动作的进入、取出、脱落方向不得反译。
 不得把 하지 마 或 그만해 译成“继续”或同意；应保留“不要、住手、停下”的含义。
 기다려 必须保留“等一下”，안 들었어／못 들었어 必须保留“没听到”，봐줘／살려줘 必须保留求饶或求救含义。
 成人语境也必须忠实翻译，不得把拒绝反译成同意。
@@ -55,9 +57,9 @@ def audit_translation(source: str, zh: str, source_language: str = "ja") -> list
     negative_re = NEGATIVE_SOURCE[source_language]
     if negative_re.search(source) and not NEGATIVE_ZH.search(zh):
         problems.append(f"{source_name}的否定或纠正含义没有保留")
-    if "やめて" in source and ("别停" in zh or "继续" in zh):
+    if re.search(r"やめて|やめろ", source) and ("别停" in zh or "继续" in zh):
         problems.append("やめて 被反译")
-    if "やめて" in source and not re.search(r"住手|停下|停一|不要|别这样", zh):
+    if re.search(r"やめて|やめろ", source) and not re.search(r"住手|停下|停一|不要|别这样", zh):
         problems.append("やめて 缺少停止或拒绝含义")
     if "待って" in source and "等" not in zh:
         problems.append("待って 必须包含等一下")
@@ -65,6 +67,10 @@ def audit_translation(source: str, zh: str, source_language: str = "ja") -> list
         problems.append("聞いてない 必须保留没听或不知道")
     if "勘弁" in source and not re.search(r"饶|放过|受不了|别再", zh):
         problems.append("勘弁 的求饶语气未体现")
+    if "抜けちゃった" in source and not re.search(r"掉|脱|出来|滑|拔|抜", zh):
+        problems.append("抜けちゃった 的脱落方向没有保留")
+    if re.search(r"入れます|入れる", source) and not re.search(r"放|进|插|装|加入", zh):
+        problems.append("入れます 的放入方向没有保留")
     if re.search(r"하지\s*마|그만해", source) and not re.search(r"不要|别|住手|停下|够了", zh):
         problems.append("韩语制止或拒绝含义没有保留")
     if "기다려" in source and "等" not in zh:
@@ -79,7 +85,9 @@ def audit_translation(source: str, zh: str, source_language: str = "ja") -> list
 
 
 def safe_high_risk(source: str, zh: str, source_language: str = "ja") -> str:
-    if "やめて" in source:
+    if re.search(r"やめて|やめろ", source):
+        if re.search(r"住手|停下|停一|不要|别这样", zh) and "继续" not in zh and "别停" not in zh:
+            return zh
         if "本当に" in source:
             return "真的，住手"
         if "ちょっと" in source:
@@ -91,6 +99,10 @@ def safe_high_risk(source: str, zh: str, source_language: str = "ja") -> str:
         return "请放过我吧"
     if "勘弁" in source:
         return "饶了我吧"
+    if "抜けちゃった" in source:
+        return zh if re.search(r"掉|脱|出来|滑|拔", zh) else "啊，掉出来了"
+    if re.search(r"入れます|入れる", source):
+        return zh if re.search(r"放|进|插|装|加入", zh) else "要放进去了"
     if source_language == "ko":
         if re.search(r"하지\s*마|그만해", source):
             return "住手"
@@ -120,19 +132,32 @@ def translate_cues(
     output = []
     for index, source in enumerate(rows):
         row = dict(source)
-        context = [
-            {"id": i + 1, "source": source_text(rows[i])}
-            for i in range(max(0, index - 2), min(len(rows), index + 3))
-        ]
+        context = []
+        for i in range(max(0, index - 4), min(len(rows), index + 5)):
+            item = {"id": i + 1, "source": source_text(rows[i])}
+            if i < len(output):
+                item["zh"] = output[i].get("zh", "")
+            context.append(item)
         original = source_text(row)
         request = {"context": context, "target": {"id": index + 1, "source": original}}
         parsed = provider.chat_json(settings.model, system_prompt, request)
         zh = str(parsed.get("zh", "")).strip().replace("。", "")
         problems = audit_translation(original, zh, source_language)
         if problems:
+            request["previous_zh"] = zh
             parsed = provider.chat_json(
                 settings.model,
                 system_prompt + "\n上次译文未通过审计，请修正：" + "；".join(problems),
+                request,
+            )
+            zh = str(parsed.get("zh", "")).strip().replace("。", "")
+        if SOURCE_SCRIPT[source_language].search(zh):
+            request["previous_zh"] = zh
+            parsed = provider.chat_json(
+                settings.model,
+                system_prompt
+                + "\n请只修复译文中残留的源语言字符：人名应音译成中文，"
+                + "其余内容忠实转成简体中文，不得删除原意。",
                 request,
             )
             zh = str(parsed.get("zh", "")).strip().replace("。", "")
