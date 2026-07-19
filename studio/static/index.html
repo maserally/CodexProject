@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.6.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.7.0">
 </head>
 <body>
   <main class="shell">
@@ -103,8 +103,22 @@
       </div>
     </section>
 
+    <section id="cloud-worker-panel" class="panel">
+      <div class="section-title"><div><h2>6. 云 GPU 运算单元</h2><p class="muted">可选：视频留在本机，仅上传自动提取的 FLAC 音轨；云端完成 Whisper 运算后，本机继续翻译、校正和生成产物。</p></div><label class="switch-label"><input id="cloud-worker-enabled" type="checkbox">使用云 GPU</label></div>
+      <div id="cloud-worker-fields" class="cloud-worker-grid disabled-panel">
+        <label>服务器地址<input id="cloud-worker-host" placeholder="例如 AutoDL 实例 SSH 地址"></label>
+        <label>SSH 端口<input id="cloud-worker-port" type="number" min="1" max="65535" value="22"></label>
+        <label>用户名<input id="cloud-worker-username" value="root"></label>
+        <label>SSH 密码<input id="cloud-worker-password" type="password" autocomplete="off"><small class="field-help">使用 Windows DPAPI 加密保存在本机，不进入任务记录或 Git</small></label>
+        <label>私钥路径（与密码二选一）<input id="cloud-worker-key" placeholder="C:\Users\你\.ssh\id_ed25519"></label>
+        <label>云端工作目录<input id="cloud-worker-dir" value="/root/subtitle-worker"></label>
+      </div>
+      <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次连接自动安装 Python 环境、FFmpeg 和 Whisper 运算依赖</label>
+      <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">连接并安装运算环境</button><span id="cloud-worker-status" class="muted"></span></div>
+    </section>
+
     <section class="panel provider-storage">
-      <div><h2 id="provider-storage-title">6. 本地接口配置</h2><p id="provider-storage-help" class="muted">识别、翻译和校正配置保存到 studio_data/settings/provider_settings.json；API Key 使用当前 Windows 用户的 DPAPI 加密，文件不会提交到 Git。</p></div>
+      <div><h2 id="provider-storage-title">7. 本地接口配置</h2><p id="provider-storage-help" class="muted">模型、云节点和接口配置保存到 studio_data/settings/provider_settings.json；密码与 API Key 使用当前 Windows 用户的 DPAPI 加密，文件不会提交到 Git。</p></div>
       <button id="save-provider-settings">保存接口配置</button>
       <span id="provider-save-status" class="muted"></span>
     </section>
@@ -120,6 +134,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.6.0"></script>
+  <script src="/static/app.js?v=1.7.0"></script>
 </body>
 </html>

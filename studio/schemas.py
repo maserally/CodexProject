@@ -15,6 +15,17 @@ class ProviderSettings(BaseModel):
     model: str = ""
 
 
+class CloudWorkerSettings(BaseModel):
+    enabled: bool = False
+    host: str = ""
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = "root"
+    password: str = ""
+    private_key_path: str = ""
+    remote_dir: str = "/root/subtitle-worker"
+    auto_setup: bool = True
+
+
 class JobOptions(BaseModel):
     input_path: str
     output_name: str = ""
@@ -69,3 +80,8 @@ class SavedProviderSettings(BaseModel):
         )
     )
     verifier_model: str = "large-v3"
+    cloud_worker: CloudWorkerSettings = Field(default_factory=CloudWorkerSettings)
+
+
+class CloudWorkerRequest(BaseModel):
+    cloud_worker: CloudWorkerSettings

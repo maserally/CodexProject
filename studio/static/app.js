@@ -19,7 +19,8 @@ function modelValue(id){const el=$(id);if(!el)return'';if(el.value==='__custom__
 function syncCustomModel(id){const custom=$(id.replace('-model','-model-custom'));if(custom)custom.classList.toggle('hidden',$(id).value!=='__custom__')}
 function fillSavedModel(id,models,installed,value,allowCustom=true){fillModelSelect(id,models,installed,value,allowCustom);if(value&&!models.includes(value)&&allowCustom){$(id).value='__custom__';const custom=$(id.replace('-model','-model-custom'));if(custom)custom.value=value;syncCustomModel(id)}}
 
-function providerSettingsBody(){return{asr:{kind:$('#asr-kind').value,base_url:$('#asr-url').value.trim(),api_key:$('#asr-key').value,model:modelValue('#asr-model')},translator:{kind:$('#translator-kind').value,base_url:$('#translator-url').value.trim(),api_key:$('#translator-key').value,model:modelValue('#translator-model')},text_reviewer:{kind:$('#text-reviewer-kind').value,base_url:$('#text-reviewer-url').value.trim(),api_key:$('#text-reviewer-key').value,model:modelValue('#text-reviewer-model')},verifier_model:modelValue('#verifier-model')}}
+function cloudWorkerBody(){return{enabled:$('#cloud-worker-enabled').checked,host:$('#cloud-worker-host').value.trim(),port:Number($('#cloud-worker-port').value||22),username:$('#cloud-worker-username').value.trim(),password:$('#cloud-worker-password').value,private_key_path:$('#cloud-worker-key').value.trim(),remote_dir:$('#cloud-worker-dir').value.trim(),auto_setup:$('#cloud-worker-auto-setup').checked}}
+function providerSettingsBody(){return{asr:{kind:$('#asr-kind').value,base_url:$('#asr-url').value.trim(),api_key:$('#asr-key').value,model:modelValue('#asr-model')},translator:{kind:$('#translator-kind').value,base_url:$('#translator-url').value.trim(),api_key:$('#translator-key').value,model:modelValue('#translator-model')},text_reviewer:{kind:$('#text-reviewer-kind').value,base_url:$('#text-reviewer-url').value.trim(),api_key:$('#text-reviewer-key').value,model:modelValue('#text-reviewer-model')},verifier_model:modelValue('#verifier-model'),cloud_worker:cloudWorkerBody()}}
 async function saveProviderSettings(showStatus=true){const data=await jsonFetch('/api/settings/providers',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(providerSettingsBody())});if(showStatus)$('#provider-save-status').textContent=data.secret_policy==='environment'?'模型与地址已保存；云端 API Key 请通过环境变量配置':`已保存到 ${data.path}`;return data}
 const saveProviderButton=$('#save-provider-settings');if(saveProviderButton)saveProviderButton.onclick=async()=>{try{await saveProviderSettings(true)}catch(e){const status=$('#provider-save-status');if(status)status.textContent=`保存失败：${e.message}`}};
 
@@ -36,6 +37,7 @@ async function init(){
     $$('.tab').forEach(x=>x.classList.toggle('active',x.dataset.mode==='upload'));
     $$('.source-view').forEach(x=>x.classList.toggle('active',x.id==='upload-source'));
     $('#soft-video').checked=false;$('#hard-video').checked=false;
+    $('#cloud-worker-panel').classList.add('hidden');
     $('#provider-storage-title').textContent='6. 云端接口配置';
     $('#provider-storage-help').textContent='模型与 Base URL 保存到云端数据目录；API Key 不写入磁盘，请使用 SUBTITLE_ASR_API_KEY、SUBTITLE_TRANSLATOR_API_KEY 和 SUBTITLE_REVIEWER_API_KEY 环境变量。';
   }
@@ -47,12 +49,14 @@ async function init(){
   reviewerUrls[textReviewer.kind]=textReviewer.base_url||reviewerUrls[textReviewer.kind];
   $('#asr-kind').value=asr.kind;$('#asr-url').value=asr.base_url;$('#asr-key').value=asr.api_key||'';$('#translator-kind').value=translator.kind;$('#translator-url').value=translator.base_url;$('#translator-key').value=translator.api_key||'';$('#text-reviewer-kind').value=textReviewer.kind;$('#text-reviewer-url').value=textReviewer.base_url;$('#text-reviewer-key').value=textReviewer.api_key||'';lastAsrKind=asr.kind;lastTranslatorKind=translator.kind;lastTextReviewerKind=textReviewer.kind;
   if(asr.api_key_configured)$('#asr-key').placeholder='已通过云端环境变量配置';if(translator.api_key_configured)$('#translator-key').placeholder='已通过云端环境变量配置';if(textReviewer.api_key_configured)$('#text-reviewer-key').placeholder='已通过云端环境变量配置';
+  const worker=saved?.cloud_worker||{};$('#cloud-worker-enabled').checked=Boolean(worker.enabled);$('#cloud-worker-host').value=worker.host||'';$('#cloud-worker-port').value=worker.port||22;$('#cloud-worker-username').value=worker.username||'root';$('#cloud-worker-password').value=worker.password||'';$('#cloud-worker-key').value=worker.private_key_path||'';$('#cloud-worker-dir').value=worker.remote_dir||'/root/subtitle-worker';$('#cloud-worker-auto-setup').checked=worker.auto_setup!==false;if(worker.password_configured&&!worker.password)$('#cloud-worker-password').placeholder='已加密保存';syncCloudWorkerFields();
   fillSavedModel('#asr-model',asr.kind==='local_whisper'?localWhisperModels:(asr.model?[asr.model]:[]),asr.kind==='local_whisper'?installedWhisperModels:null,asr.model||'medium');
   fillSavedModel('#verifier-model',localWhisperModels,installedWhisperModels,saved?.verifier_model||'large-v3',false);
   fillSavedModel('#translator-model',translator.kind==='local_ollama'?localOllamaModels:(translator.model?[translator.model]:[]),translator.kind==='local_ollama'?localOllamaModels:null,translator.model||'qwen2.5:7b-instruct');
   fillSavedModel('#text-reviewer-model',textReviewer.kind==='local_ollama'?localOllamaModels:(textReviewer.model?[textReviewer.model]:[]),textReviewer.kind==='local_ollama'?localOllamaModels:null,textReviewer.model||'qwen2.5:7b-instruct');
   syncProviderFields();
   $('#installed-whisper').textContent=local.whisper_installed.length?`本机已安装：${local.whisper_installed.join('、')}　其他列表项首次使用时需要下载`:'本机尚未缓存 Whisper 模型；首次运行所选模型时需要下载';
+  syncCloudWorkerFields();
   updateModelHelp();
   renderJobs(); setInterval(renderJobs,2500);
 }
@@ -88,6 +92,11 @@ function syncProviderFields(){
 }
 $('#asr-kind').onchange=syncProviderFields; $('#translator-kind').onchange=syncProviderFields; $('#text-reviewer-kind').onchange=syncProviderFields;
 
+function syncCloudWorkerFields(){const enabled=$('#cloud-worker-enabled').checked;$('#cloud-worker-fields').classList.toggle('disabled-panel',!enabled);$('#cloud-worker-fields').querySelectorAll('input').forEach(x=>x.disabled=!enabled);$('#cloud-worker-auto-setup').disabled=!enabled;const status=$('#installed-whisper');if(status)status.textContent=enabled?'云节点首次任务会自动下载所选 Whisper 模型，之后复用云端缓存':(installedWhisperModels.length?`本机已安装：${installedWhisperModels.join('、')}　其他列表项首次使用时需要下载`:'本机尚未缓存 Whisper 模型；首次运行所选模型时需要下载');updateModelHelp()}
+$('#cloud-worker-enabled').onchange=syncCloudWorkerFields;
+async function cloudWorkerAction(action){const status=$('#cloud-worker-status'),button=$(`#${action==='test'?'test':'bootstrap'}-cloud-worker`);status.textContent=action==='test'?'正在测试 SSH 连接…':'正在安装，首次可能需要数分钟…';button.disabled=true;try{const worker=cloudWorkerBody();worker.enabled=true;const data=await jsonFetch(`/api/cloud-worker/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cloud_worker:worker})});status.textContent=action==='test'?`连接正常 · ${data.gpu||'未检测到 GPU'}`:'云端运算环境安装完成';await saveProviderSettings(false)}catch(e){status.textContent=`失败：${e.message}`}finally{button.disabled=false}}
+$('#test-cloud-worker').onclick=()=>cloudWorkerAction('test');$('#bootstrap-cloud-worker').onclick=()=>cloudWorkerAction('bootstrap');
+
 async function refreshModels(kind){
   const prefix=kind==='asr'?'asr':(kind==='translator'?'translator':'text-reviewer'),provider={kind:$(`#${prefix}-kind`).value,base_url:$(`#${prefix}-url`).value,api_key:$(`#${prefix}-key`).value,model:''};
   try{const role=kind==='text-reviewer'?'text_reviewer':kind;const data=await jsonFetch('/api/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider,role})});const localState=provider.kind==='local_whisper'?installedWhisperModels:(provider.kind==='local_ollama'?data.models:null);fillModelSelect(`#${prefix}-model`,data.models,localState,data.models[0]||'');updateModelHelp()}catch(e){$('#form-error').textContent=`模型列表读取失败：${e.message}`}
@@ -98,8 +107,9 @@ function updateModelHelp(){
   const language=languageMeta[$('#source-language').value]||languageMeta.ja;
   const asr=modelValue('#asr-model'), verifier=modelValue('#verifier-model');
   $('#asr-title').textContent=`3. ${language.name}识别模型`;
-  $('#asr-model-help').textContent=$('#asr-kind').value==='local_whisper'?(whisperHelp[asr]||'本地 Whisper 模型；未缓存时首次使用需要下载'):(asr.startsWith('gpt-4o')&&asr.includes('transcribe')?'gpt-4o-transcribe 使用逐个 VAD 窗口转写，时间轴精度略低于 Whisper 分段时间戳':'远程模型如支持 verbose_json.segments 将使用精细时间轴');
-  $('#verifier-model-help').textContent=`${whisperHelp[verifier]||'本地 Whisper 复核模型'}；只复核初筛对白，不会全片重复识别`;
+  const cloudGpu=$('#cloud-worker-enabled').checked;
+  $('#asr-model-help').textContent=cloudGpu?`${asr||'所选模型'} 将在云 GPU 运行；本机只上传提取后的 FLAC 音轨`:($('#asr-kind').value==='local_whisper'?(whisperHelp[asr]||'本地 Whisper 模型；未缓存时首次使用需要下载'):(asr.startsWith('gpt-4o')&&asr.includes('transcribe')?'gpt-4o-transcribe 使用逐个 VAD 窗口转写，时间轴精度略低于 Whisper 分段时间戳':'远程模型如支持 verbose_json.segments 将使用精细时间轴'));
+  $('#verifier-model-help').textContent=`${whisperHelp[verifier]||'Whisper 复核模型'}；${cloudGpu?'在云 GPU':'在本机'}只复核初筛对白，不会全片重复识别`;
   $('#translator-model-help').textContent=$('#translator-kind').value==='local_ollama'?`本地逐句${language.pair}；请先在 Ollama 中安装所选模型`:`远程逐句${language.pair}；需要支持 Chat Completions 和 JSON 输出`;
   $('#text-reviewer-model-help').textContent=$('#text-reviewer-kind').value==='local_ollama'?'自动本地校正；按批次读取前后文，只改文字和术语一致性':'自动云端校正；需要支持 Chat Completions 和 JSON 输出，不修改时间轴';
 }
@@ -114,7 +124,7 @@ async function uploadIfNeeded(){
 
 $('#start').onclick=async()=>{
   $('#form-error').textContent=''; $('#start').disabled=true;
-  try{const input_path=await uploadIfNeeded();const asrKind=$('#asr-kind').value, transKind=$('#translator-kind').value,reviewKind=$('#text-reviewer-kind').value;const asrModel=modelValue('#asr-model'),translatorModel=modelValue('#translator-model'),reviewModel=modelValue('#text-reviewer-model');if(!asrModel||!translatorModel||!reviewModel)throw new Error('请选择或输入识别、翻译和自动校正模型');await saveProviderSettings(false);const body={input_path,output_name:$('#output-name').value.trim(),source_language:$('#source-language').value,target_language:'zh-CN',profile:$('input[name=profile]:checked').value,asr:{kind:asrKind,base_url:asrKind==='openai_compatible'?$('#asr-url').value:'',api_key:$('#asr-key').value,model:asrModel},verifier_model:modelValue('#verifier-model'),translator:{kind:transKind,base_url:$('#translator-url').value,api_key:$('#translator-key').value,model:translatorModel},text_reviewer:{kind:reviewKind,base_url:$('#text-reviewer-url').value,api_key:$('#text-reviewer-key').value,model:reviewModel},remove_chinese_periods:$('#remove-periods').checked,publish_mode:$('#publish-mode').checked,create_soft_subtitle_video:$('#soft-video').checked,create_hard_subtitle_video:$('#hard-video').checked};await jsonFetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await renderJobs()}catch(e){$('#form-error').textContent=e.message}finally{$('#start').disabled=false}
+  try{const input_path=await uploadIfNeeded();const asrKind=$('#asr-kind').value, transKind=$('#translator-kind').value,reviewKind=$('#text-reviewer-kind').value;const asrModel=modelValue('#asr-model'),translatorModel=modelValue('#translator-model'),reviewModel=modelValue('#text-reviewer-model'),worker=cloudWorkerBody();if(!asrModel||!translatorModel||!reviewModel)throw new Error('请选择或输入识别、翻译和自动校正模型');if(worker.enabled&&asrKind!=='local_whisper')throw new Error('云 GPU 运算单元用于 Whisper 识别，请将识别提供方设为本地 Whisper');if(worker.enabled&&(!worker.host||(!worker.password&&!worker.private_key_path)))throw new Error('请填写云服务器地址，以及 SSH 密码或私钥路径');await saveProviderSettings(false);const body={input_path,output_name:$('#output-name').value.trim(),source_language:$('#source-language').value,target_language:'zh-CN',profile:$('input[name=profile]:checked').value,asr:{kind:asrKind,base_url:asrKind==='openai_compatible'?$('#asr-url').value:'',api_key:$('#asr-key').value,model:asrModel},verifier_model:modelValue('#verifier-model'),translator:{kind:transKind,base_url:$('#translator-url').value,api_key:$('#translator-key').value,model:translatorModel},text_reviewer:{kind:reviewKind,base_url:$('#text-reviewer-url').value,api_key:$('#text-reviewer-key').value,model:reviewModel},remove_chinese_periods:$('#remove-periods').checked,publish_mode:$('#publish-mode').checked,create_soft_subtitle_video:$('#soft-video').checked,create_hard_subtitle_video:$('#hard-video').checked};await jsonFetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await renderJobs()}catch(e){$('#form-error').textContent=e.message}finally{$('#start').disabled=false}
 };
 
 function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}

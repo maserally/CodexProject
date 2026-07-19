@@ -16,6 +16,7 @@ from typing import Any
 
 import psutil
 
+from .cloud_worker import CloudWhisperWorker
 from .config import DATA_DIR, ROOT
 from .languages import language_info
 from .quality import PROFILE_SETTINGS, finalize_cues, quality_summary
@@ -28,7 +29,7 @@ from .recall import (
     vad_fallback_events_for_gaps,
 )
 from .remote_asr import run_remote_asr
-from .schemas import JobOptions
+from .schemas import CloudWorkerSettings, JobOptions
 from .subtitles import mux_hard_subtitles, mux_soft_subtitles, write_subtitles
 from .text_review import review_cues
 from .translation import translate_cues
@@ -76,6 +77,8 @@ class JobState:
     logs: list[str] = field(default_factory=list)
     outputs: dict[str, str] = field(default_factory=dict)
     error: str = ""
+    cloud_worker_settings: CloudWorkerSettings | None = field(default=None, repr=False)
+    cloud_session: Any = field(default=None, repr=False)
 
     def public(self):
         safe_options = self.options.model_dump()
@@ -133,8 +136,16 @@ class JobManager:
             except Exception:
                 continue
 
-    def create(self, options: JobOptions):
-        job = JobState(id=uuid.uuid4().hex[:12], options=options)
+    def create(
+        self,
+        options: JobOptions,
+        cloud_worker_settings: CloudWorkerSettings | None = None,
+    ):
+        job = JobState(
+            id=uuid.uuid4().hex[:12],
+            options=options,
+            cloud_worker_settings=cloud_worker_settings,
+        )
         with self.lock:
             self.jobs[job.id] = job
             self.controls[job.id] = JobControl()
@@ -201,6 +212,8 @@ class JobManager:
         control.previous_status = job.status
         control.previous_stage = job.stage
         control.run_gate.clear()
+        if job.cloud_session:
+            job.cloud_session.pause_current()
         for process in self._processes(control.process):
             try:
                 process.suspend()
@@ -216,6 +229,8 @@ class JobManager:
         if job.status != "paused":
             raise RuntimeError("任务当前没有暂停")
         control = self._control(job_id)
+        if job.cloud_session:
+            job.cloud_session.resume_current()
         for process in reversed(self._processes(control.process)):
             try:
                 process.resume()
@@ -239,6 +254,8 @@ class JobManager:
         control = self._control(job_id)
         control.cancel_event.set()
         control.run_gate.set()
+        if job.cloud_session:
+            job.cloud_session.cancel_current()
         processes = self._processes(control.process)
         for process in processes:
             try:
@@ -337,6 +354,20 @@ class JobManager:
             if job.status != "canceled":
                 self.update(job, status="canceled", stage="任务已取消", log="任务已取消")
         finally:
+            session = job.cloud_session
+            if session:
+                try:
+                    session.checkpoint = lambda: None
+                    session.cleanup_job()
+                except Exception:
+                    pass
+                finally:
+                    session.close()
+                    job.cloud_session = None
+            cloud_audio = (JOBS_DIR / job.id / "work" / "cloud_audio.flac").resolve()
+            expected_workdir = (JOBS_DIR / job.id / "work").resolve()
+            if cloud_audio.parent == expected_workdir:
+                cloud_audio.unlink(missing_ok=True)
             if acquired:
                 GPU_LOCK.release()
             control.finished_event.set()
@@ -410,37 +441,118 @@ class JobManager:
         language = language_info(options.source_language)
         python = sys.executable
         duration = self.media_duration(media)
+        worker_settings = job.cloud_worker_settings
+        use_cloud_worker = bool(
+            worker_settings and worker_settings.enabled and options.asr.kind == "local_whisper"
+        )
+        analysis_media = media
+        if use_cloud_worker:
+            self.update(
+                job,
+                status="running",
+                stage="本地提取云识别音轨",
+                progress=0.01,
+                log="原视频保留在本机，仅向云节点上传单声道 FLAC 音轨",
+            )
+            analysis_media = workdir / "cloud_audio.flac"
+            self.run_command(
+                job,
+                [
+                    "ffmpeg", "-y", "-i", str(media), "-vn", "-ac", "1", "-ar", "16000",
+                    "-c:a", "flac", "-compression_level", "8", str(analysis_media),
+                ],
+            )
         self.update(job, status="running", stage="声音活动检测", progress=0.03, log=f"视频时长 {duration:.2f} 秒")
 
         vad_path = workdir / "vad_segments.json"
         self.run_command(
             job,
-            [python, str(ROOT / "vad_scan.py"), str(media), "--output", str(vad_path), "--mode", "3"],
+            [python, str(ROOT / "vad_scan.py"), str(analysis_media), "--output", str(vad_path), "--mode", "3"],
         )
         vad_segments = json.loads(vad_path.read_text(encoding="utf-8"))
 
+        worker = None
+        if use_cloud_worker:
+            self.update(job, stage="连接云 GPU 运算单元", progress=0.08)
+            worker = CloudWhisperWorker(
+                worker_settings,
+                logger=lambda message: self.update(job, log=message[-600:]),
+                checkpoint=lambda: self.checkpoint(job),
+            )
+            job.cloud_session = worker
+            worker.prepare_job(job.id, analysis_media)
+
         events_path = workdir / "event_segments.json"
         self.update(job, stage="喘息与语音分类", progress=0.12)
-        self.run_command(
-            job,
-            [
-                python, str(ROOT / "audio_event_gate.py"), str(media), "--vad", str(vad_path),
-                "--output", str(events_path),
-            ],
-        )
-        events = json.loads(events_path.read_text(encoding="utf-8"))
-
-        self.update(job, stage=f"{language['name']}语音识别", progress=0.25)
-        if options.asr.kind == "local_whisper":
+        if worker:
+            worker.run_event_gate(vad_path, events_path)
+        else:
             self.run_command(
                 job,
                 [
-                    python, str(ROOT / "asr_stage.py"), str(media), "--events", str(events_path),
-                    "--workdir", str(workdir), "--model", options.asr.model,
-                    "--language", options.source_language,
-                    "--speech-threshold", str(profile["speech_threshold"]),
-                    "--nonlexical-factor", str(profile["nonlexical_factor"]),
+                    python, str(ROOT / "audio_event_gate.py"), str(analysis_media),
+                    "--vad", str(vad_path), "--output", str(events_path),
                 ],
+            )
+        events = json.loads(events_path.read_text(encoding="utf-8"))
+
+        def execute_whisper_asr(
+            event_file: Path,
+            target_workdir: Path,
+            *,
+            label: str,
+            speech_threshold: float,
+            nonlexical_factor: float,
+        ):
+            if worker:
+                worker.run_asr(
+                    event_file,
+                    target_workdir,
+                    label=label,
+                    model=options.asr.model,
+                    language=options.source_language,
+                    speech_threshold=speech_threshold,
+                    nonlexical_factor=nonlexical_factor,
+                )
+            else:
+                self.run_command(
+                    job,
+                    [
+                        python, str(ROOT / "asr_stage.py"), str(analysis_media),
+                        "--events", str(event_file), "--workdir", str(target_workdir),
+                        "--model", options.asr.model, "--language", options.source_language,
+                        "--speech-threshold", str(speech_threshold),
+                        "--nonlexical-factor", str(nonlexical_factor),
+                    ],
+                )
+
+        def execute_whisper_review(source_file: Path, target_workdir: Path, *, label: str):
+            if worker:
+                worker.run_review(
+                    source_file,
+                    target_workdir,
+                    label=label,
+                    model=options.verifier_model,
+                    language=options.source_language,
+                )
+            else:
+                self.run_command(
+                    job,
+                    [
+                        python, str(ROOT / "large_review.py"), str(analysis_media),
+                        "--medium", str(source_file), "--workdir", str(target_workdir),
+                        "--model", options.verifier_model, "--language", options.source_language,
+                    ],
+                )
+
+        self.update(job, stage=f"{language['name']}语音识别", progress=0.25)
+        if options.asr.kind == "local_whisper":
+            execute_whisper_asr(
+                events_path,
+                workdir,
+                label="primary",
+                speech_threshold=profile["speech_threshold"],
+                nonlexical_factor=profile["nonlexical_factor"],
             )
         elif options.asr.kind == "openai_compatible":
             def remote_progress(current, total, text):
@@ -450,7 +562,7 @@ class JobManager:
                 )
 
             run_remote_asr(
-                media,
+                analysis_media,
                 events,
                 options.asr,
                 workdir,
@@ -466,14 +578,7 @@ class JobManager:
         initial_source = json.loads(source_path.read_text(encoding="utf-8"))
         if initial_source and options.verifier_model and options.verifier_model != options.asr.model:
             self.update(job, stage="第二模型复核", progress=0.46)
-            self.run_command(
-                job,
-                [
-                    python, str(ROOT / "large_review.py"), str(media), "--medium", str(source_path),
-                    "--workdir", str(workdir), "--model", options.verifier_model,
-                    "--language", options.source_language,
-                ],
-            )
+            execute_whisper_review(source_path, workdir, label="primary")
             primary_path = workdir / "source_final.json"
         else:
             primary_path = source_path
@@ -523,25 +628,17 @@ class JobManager:
                 recovery_events_path.write_text(
                     json.dumps(recovery_events, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-                self.run_command(
-                    job,
-                    [
-                        python, str(ROOT / "asr_stage.py"), str(media), "--events", str(recovery_events_path),
-                        "--workdir", str(recovery_root), "--model", options.asr.model,
-                        "--language", options.source_language,
-                        "--speech-threshold", str(profile["recovery_threshold"]),
-                        "--nonlexical-factor", str(max(1.0, profile["nonlexical_factor"] - 0.1)),
-                    ],
+                execute_whisper_asr(
+                    recovery_events_path,
+                    recovery_root,
+                    label="gap_recovery",
+                    speech_threshold=profile["recovery_threshold"],
+                    nonlexical_factor=max(1.0, profile["nonlexical_factor"] - 0.1),
                 )
                 recovery_medium = recovery_root / "source_sentences.json"
                 if json.loads(recovery_medium.read_text(encoding="utf-8")):
-                    self.run_command(
-                        job,
-                        [
-                            python, str(ROOT / "large_review.py"), str(media), "--medium", str(recovery_medium),
-                            "--workdir", str(recovery_root), "--model", options.verifier_model,
-                            "--language", options.source_language,
-                        ],
+                    execute_whisper_review(
+                        recovery_medium, recovery_root, label="gap_recovery"
                     )
                     recovery_final = json.loads(
                         (recovery_root / "source_final.json").read_text(encoding="utf-8")
@@ -579,25 +676,17 @@ class JobManager:
                 music_events_path.write_text(
                     json.dumps(music_events, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-                self.run_command(
-                    job,
-                    [
-                        python, str(ROOT / "asr_stage.py"), str(media),
-                        "--events", str(music_events_path), "--workdir", str(music_root),
-                        "--model", options.asr.model, "--language", options.source_language,
-                        "--speech-threshold", str(profile["recovery_threshold"]),
-                        "--nonlexical-factor", str(max(1.0, profile["nonlexical_factor"] - 0.2)),
-                    ],
+                execute_whisper_asr(
+                    music_events_path,
+                    music_root,
+                    label="weak_speech_recovery",
+                    speech_threshold=profile["recovery_threshold"],
+                    nonlexical_factor=max(1.0, profile["nonlexical_factor"] - 0.2),
                 )
                 music_medium = music_root / "source_sentences.json"
                 if json.loads(music_medium.read_text(encoding="utf-8")):
-                    self.run_command(
-                        job,
-                        [
-                            python, str(ROOT / "large_review.py"), str(media),
-                            "--medium", str(music_medium), "--workdir", str(music_root),
-                            "--model", options.verifier_model, "--language", options.source_language,
-                        ],
+                    execute_whisper_review(
+                        music_medium, music_root, label="weak_speech_recovery"
                     )
                     music_final = json.loads(
                         (music_root / "source_final.json").read_text(encoding="utf-8")
@@ -618,6 +707,12 @@ class JobManager:
                         job,
                         log=f"未覆盖弱对白经双模型确认补回 {music_recovered_count} 条",
                     )
+
+        if worker:
+            self.update(job, stage="回收云端临时音轨", progress=0.68)
+            worker.cleanup_job()
+            worker.close()
+            job.cloud_session = None
 
         self.update(job, stage="逐句翻译与否定词审计", progress=0.70)
         def translation_progress(current, total, _):

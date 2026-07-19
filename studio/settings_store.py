@@ -75,6 +75,16 @@ def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, A
         "translator": {"kind": "local_ollama", "base_url": "http://127.0.0.1:11434", "api_key": "", "model": "qwen2.5:7b-instruct"},
         "text_reviewer": {"kind": "local_ollama", "base_url": "http://127.0.0.1:11434", "api_key": "", "model": "qwen2.5:7b-instruct"},
         "verifier_model": "large-v3",
+        "cloud_worker": {
+            "enabled": False,
+            "host": "",
+            "port": 22,
+            "username": "root",
+            "password": "",
+            "private_key_path": "",
+            "remote_dir": "/root/subtitle-worker",
+            "auto_setup": True,
+        },
     }
     if SETTINGS_PATH.exists():
         try:
@@ -91,6 +101,16 @@ def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, A
             defaults["verifier_model"] = str(
                 stored.get("verifier_model", defaults["verifier_model"])
             )
+            worker = stored.get("cloud_worker", {})
+            for key in (
+                "enabled", "host", "port", "username", "private_key_path",
+                "remote_dir", "auto_setup",
+            ):
+                if key in worker:
+                    defaults["cloud_worker"][key] = worker[key]
+            defaults["cloud_worker"]["password"] = _unprotect(
+                str(worker.get("password", ""))
+            )
         except Exception:
             pass
     expose = SECURE_LOCAL_SECRETS if expose_secrets is None else expose_secrets
@@ -102,6 +122,10 @@ def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, A
             defaults[name]["api_key"] = saved_value
         else:
             defaults[name]["api_key"] = ""
+    worker_password = str(defaults["cloud_worker"].get("password", ""))
+    defaults["cloud_worker"]["password_configured"] = bool(worker_password)
+    if not expose:
+        defaults["cloud_worker"]["password"] = ""
     return defaults
 
 
@@ -116,6 +140,17 @@ def save_provider_settings(settings: dict[str, Any]) -> Path:
             "api_key": _protect(str(section.get("api_key", ""))),
         }
     stored["verifier_model"] = str(settings.get("verifier_model", "")).strip()
+    worker = settings.get("cloud_worker", {})
+    stored["cloud_worker"] = {
+        "enabled": bool(worker.get("enabled", False)),
+        "host": str(worker.get("host", "")).strip(),
+        "port": int(worker.get("port", 22)),
+        "username": str(worker.get("username", "root")).strip(),
+        "password": _protect(str(worker.get("password", ""))),
+        "private_key_path": str(worker.get("private_key_path", "")).strip(),
+        "remote_dir": str(worker.get("remote_dir", "/root/subtitle-worker")).strip(),
+        "auto_setup": bool(worker.get("auto_setup", True)),
+    }
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = SETTINGS_PATH.with_suffix(".tmp")
     temporary.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")

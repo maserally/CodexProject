@@ -15,6 +15,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .cloud_worker import CloudWhisperWorker
 from .config import (
     ALLOW_LOCAL_OPEN,
     BASIC_AUTH_ENABLED,
@@ -32,7 +33,13 @@ from .providers import (
     whisper_model_catalog,
 )
 from .runner import JOBS_DIR, UPLOADS_DIR, manager
-from .schemas import JobOptions, ModelListRequest, SavedProviderSettings
+from .schemas import (
+    CloudWorkerRequest,
+    CloudWorkerSettings,
+    JobOptions,
+    ModelListRequest,
+    SavedProviderSettings,
+)
 from .settings_store import (
     load_provider_settings,
     resolve_provider_api_keys,
@@ -41,7 +48,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.6.0")
+app = FastAPI(title="字幕翻译工作室", version="1.7.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 
@@ -177,7 +184,30 @@ def create_job(options: JobOptions):
     path = Path(options.input_path)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=400, detail="输入视频不存在或不是文件")
-    return manager.create(options).public()
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    return manager.create(options, worker if worker.enabled else None).public()
+
+
+@app.post("/api/cloud-worker/test")
+def test_cloud_worker(request: CloudWorkerRequest):
+    try:
+        return {"ok": True, **CloudWhisperWorker(request.cloud_worker).test_connection()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/cloud-worker/bootstrap")
+def bootstrap_cloud_worker(request: CloudWorkerRequest):
+    worker = CloudWhisperWorker(request.cloud_worker)
+    try:
+        worker.connect()
+        result = worker.bootstrap()
+        return {"ok": True, **result}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        worker.close()
 
 
 @app.get("/api/jobs")
