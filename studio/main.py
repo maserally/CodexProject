@@ -51,7 +51,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.10.0")
+app = FastAPI(title="字幕翻译工作室", version="1.11.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -282,7 +282,32 @@ def pick_local_folder(request: FolderPickerRequest):
 @app.post("/api/jobs/batch")
 def create_folder_jobs(request: FolderBatchRequest):
     folder, files = _video_files_in(request.input_dir, request.recursive)
+    if request.selected_files is not None:
+        discovered = {os.path.normcase(str(path)): path for path in files}
+        requested: set[str] = set()
+        invalid: list[str] = []
+        for selected in request.selected_files:
+            relative = Path(str(selected).strip())
+            candidate = (folder / relative).resolve()
+            key = os.path.normcase(str(candidate))
+            if (
+                not str(selected).strip()
+                or relative.is_absolute()
+                or not candidate.is_relative_to(folder)
+                or key not in discovered
+            ):
+                invalid.append(str(selected))
+            else:
+                requested.add(key)
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"所选文件不在本次扫描结果中：{invalid[0]}",
+            )
+        files = [path for path in files if os.path.normcase(str(path)) in requested]
     if not files:
+        if request.selected_files is not None:
+            raise HTTPException(status_code=400, detail="请至少选择一个需要转换的视频")
         scope = "及其子文件夹" if request.recursive else "第一层"
         raise HTTPException(status_code=400, detail=f"该文件夹{scope}没有支持的视频文件")
     output_dir = None

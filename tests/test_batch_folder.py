@@ -73,6 +73,55 @@ class BatchFolderTests(unittest.TestCase):
                 ["one", "one_mp4", "two"],
             )
 
+    def test_batch_creates_jobs_for_selected_files_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source"
+            nested = source / "nested"
+            nested.mkdir(parents=True)
+            (source / "skip.mp4").write_bytes(b"")
+            (nested / "keep.mp4").write_bytes(b"")
+            captured = []
+
+            def fake_create(options, worker):
+                captured.append(options)
+                return SimpleNamespace(public=lambda: {"input": options.input_path})
+
+            request = FolderBatchRequest(
+                input_dir=str(source),
+                selected_files=[str(Path("nested") / "keep.mp4")],
+                options=JobOptions(input_path=""),
+            )
+            with patch("studio.main.manager.create", side_effect=fake_create), patch(
+                "studio.main.load_provider_settings", return_value={"cloud_worker": {}}
+            ):
+                result = create_folder_jobs(request)
+
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(Path(captured[0].input_path).name, "keep.mp4")
+
+    def test_batch_rejects_empty_or_stale_file_selection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "one.mp4").write_bytes(b"")
+            empty_request = FolderBatchRequest(
+                input_dir=str(root),
+                selected_files=[],
+                options=JobOptions(input_path=""),
+            )
+            with self.assertRaises(HTTPException) as empty_error:
+                create_folder_jobs(empty_request)
+            self.assertEqual(empty_error.exception.status_code, 400)
+
+            stale_request = FolderBatchRequest(
+                input_dir=str(root),
+                selected_files=["missing.mp4"],
+                options=JobOptions(input_path=""),
+            )
+            with self.assertRaises(HTTPException) as stale_error:
+                create_folder_jobs(stale_request)
+            self.assertEqual(stale_error.exception.status_code, 400)
+
     def test_batch_rejects_output_equal_to_input(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

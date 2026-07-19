@@ -91,6 +91,7 @@ class FolderBatchRequest(BaseModel):
     input_dir: str
     output_dir: str = ""
     recursive: bool = True
+    selected_files: list[str] | None = None
     options: JobOptions
 
     @field_validator("input_dir", "output_dir", mode="before")
