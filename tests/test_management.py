@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from studio.main import app
+from studio.main import _bulk_job_action, app
 from studio.providers import supports_segment_timestamps
 from studio.remote_asr import _remote_packs
 from studio.runner import JobControl, JobManager, JobState
@@ -103,6 +103,38 @@ class TaskManagementTests(unittest.TestCase):
         self.assertIn("/api/jobs/{job_id}/pause", paths)
         self.assertIn("/api/jobs/{job_id}/resume", paths)
         self.assertIn("/api/jobs/{job_id}/cancel", paths)
+        self.assertIn("/api/jobs/actions/pause-all", paths)
+        self.assertIn("/api/jobs/actions/cancel-all", paths)
+        self.assertIn("/api/jobs/actions/delete-finished", paths)
+
+    def test_bulk_actions_only_target_eligible_job_states(self):
+        class FakeManager:
+            def __init__(self):
+                self.paused = []
+                self.deleted = []
+
+            def list(self):
+                return [
+                    {"id": "running", "status": "running"},
+                    {"id": "queued", "status": "queued"},
+                    {"id": "done", "status": "completed"},
+                ]
+
+            def pause(self, job_id):
+                self.paused.append(job_id)
+
+            def delete(self, job_id):
+                self.deleted.append(job_id)
+
+        fake = FakeManager()
+        with patch("studio.main.manager", fake):
+            paused = _bulk_job_action("pause", {"queued", "running"})
+            deleted = _bulk_job_action("delete", {"completed", "failed", "canceled"})
+
+        self.assertEqual(paused["count"], 2)
+        self.assertEqual(set(fake.paused), {"running", "queued"})
+        self.assertEqual(deleted["count"], 1)
+        self.assertEqual(fake.deleted, ["done"])
 
     def test_task_status_hides_all_provider_api_keys(self):
         options = JobOptions(

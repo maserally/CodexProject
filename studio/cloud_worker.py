@@ -111,7 +111,11 @@ class CloudWhisperWorker:
                 f"echo $$ > {control}; {command}; status=$?; "
                 f"rm -f {control}; exit $status"
             )
-            command = "setsid bash -lc " + shlex.quote(inner)
+            # util-linux setsid may fork when its caller is already a process-group
+            # leader. Without --wait the SSH channel can report success while the
+            # actual GPU command is still starting, so callers race to download
+            # output files that do not exist yet.
+            command = "setsid --wait bash -lc " + shlex.quote(inner)
         channel.exec_command(command)
         output: list[str] = []
         errors: list[str] = []
@@ -241,7 +245,13 @@ touch {remote}/.worker-ready-v2
         if not self.sftp:
             raise CloudWorkerError("云节点文件通道尚未连接")
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        self.sftp.get(remote_path, str(local_path))
+        try:
+            self.sftp.get(remote_path, str(local_path))
+        except FileNotFoundError as exc:
+            raise CloudWorkerError(
+                f"云节点没有生成预期结果文件：{remote_path}。"
+                "远程运算可能提前退出，请查看该任务在此错误之前的云端日志"
+            ) from exc
 
     def prepare_job(self, job_id: str, audio_path: Path):
         if not self.client:

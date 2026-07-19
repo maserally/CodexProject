@@ -149,6 +149,10 @@ async function pauseJob(id){await jobAction(id,'pause')}
 async function resumeJob(id){await jobAction(id,'resume')}
 async function cancelJob(id){if(confirm('确定取消这个任务？当前阶段会停止，已生成的中间文件会保留到你删除任务为止。'))await jobAction(id,'cancel')}
 async function deleteJob(id){if(!confirm('永久删除这条任务及其任务目录？指定到外部输出文件夹的产物会保留；网页上传且未被其他任务使用的素材副本会删除。此操作不可恢复。'))return;try{await jsonFetch(`/api/jobs/${id}`,{method:'DELETE'});[...openJobDetails].filter(x=>x.startsWith(`${id}:`)).forEach(x=>openJobDetails.delete(x));await renderJobs()}catch(e){alert(e.message)}}
+async function bulkJobAction(action,{method='POST',confirmation='',label}){if(confirmation&&!confirm(confirmation))return;const buttons=$$('.job-bulk-actions button');buttons.forEach(button=>button.disabled=true);try{const data=await jsonFetch(`/api/jobs/actions/${action}`,{method});if(action==='delete-finished')openJobDetails.clear();const failed=data.failed?.length||0;alert(`${label}：成功 ${data.count} 个${failed?`，另有 ${failed} 个未处理`:''}`);await renderJobs()}catch(e){alert(`${label}失败：${e.message}`)}finally{buttons.forEach(button=>button.disabled=false)}}
+$('#pause-all-jobs').onclick=()=>bulkJobAction('pause-all',{label:'全部暂停'});
+$('#cancel-all-jobs').onclick=()=>bulkJobAction('cancel-all',{label:'全部取消',confirmation:'确定取消所有运行中、排队中和暂停中的任务？当前处理会停止，中间文件会保留到删除任务为止。'});
+$('#delete-all-jobs').onclick=()=>bulkJobAction('delete-finished',{method:'DELETE',label:'全部删除',confirmation:'永久删除所有已完成、失败和已取消的任务及其任务目录？外部输出文件夹中的产物会保留；此操作不可恢复。运行中的任务不会被删除。'});
 async function openOutput(id,key){try{await jsonFetch(`/api/jobs/${id}/open/${encodeURIComponent(key)}`,{method:'POST'})}catch(e){alert(`打开失败：${e.message}`)}}
 async function openOutputFolder(id){try{await jsonFetch(`/api/jobs/${id}/open-folder`,{method:'POST'})}catch(e){alert(`打开文件夹失败：${e.message}`)}}
 function detailMarkup(id,type,title,content,titleClass=''){const key=`${id}:${type}`;return`<details data-open-key="${key}" ${openJobDetails.has(key)?'open':''}><summary class="${titleClass}">${title}</summary><pre class="logs">${esc(content)}</pre></details>`}

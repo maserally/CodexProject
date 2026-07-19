@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.11.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.12.0">
 </head>
 <body>
   <main class="shell">
@@ -142,10 +142,10 @@
     </section>
 
     <section class="panel jobs">
-      <div class="section-title"><h2>任务</h2><button id="refresh-jobs">刷新</button></div>
+      <div class="section-title"><h2>任务</h2><div class="job-bulk-actions"><button id="refresh-jobs">刷新</button><button id="pause-all-jobs">全部暂停</button><button id="cancel-all-jobs" class="danger">全部取消</button><button id="delete-all-jobs" class="danger">全部删除</button></div></div>
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.11.0"></script>
+  <script src="/static/app.js?v=1.12.0"></script>
 </body>
 </html>

@@ -51,7 +51,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.11.0")
+app = FastAPI(title="字幕翻译工作室", version="1.12.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -370,6 +370,44 @@ def bootstrap_cloud_worker(request: CloudWorkerRequest):
 @app.get("/api/jobs")
 def list_jobs():
     return {"jobs": manager.list()}
+
+
+def _bulk_job_action(action: str, eligible_statuses: set[str]):
+    jobs = manager.list()
+    targets = [job["id"] for job in jobs if job["status"] in eligible_statuses]
+    succeeded = []
+    failed = []
+    for job_id in targets:
+        try:
+            if action == "delete":
+                manager.delete(job_id)
+            else:
+                getattr(manager, action)(job_id)
+            succeeded.append(job_id)
+        except (KeyError, RuntimeError, OSError) as exc:
+            failed.append({"id": job_id, "error": str(exc)})
+    return {
+        "ok": not failed,
+        "action": action,
+        "count": len(succeeded),
+        "succeeded": succeeded,
+        "failed": failed,
+    }
+
+
+@app.post("/api/jobs/actions/pause-all")
+def pause_all_jobs():
+    return _bulk_job_action("pause", {"queued", "running"})
+
+
+@app.post("/api/jobs/actions/cancel-all")
+def cancel_all_jobs():
+    return _bulk_job_action("cancel", {"queued", "running", "paused"})
+
+
+@app.delete("/api/jobs/actions/delete-finished")
+def delete_finished_jobs():
+    return _bulk_job_action("delete", {"completed", "failed", "canceled"})
 
 
 @app.get("/api/jobs/{job_id}")
