@@ -64,7 +64,7 @@
           <small class="field-help">本地 Whisper 不发送音频到网络；兼容接口适合使用云端或局域网 ASR 服务</small>
         </label>
         <div class="remote-fields hidden" data-for="asr">
-          <label>Base URL<input id="asr-url" value="https://api.openai.com/v1"><small class="field-help">服务根地址，可填到域名或 /v1；软件会自动补齐 /v1</small></label>
+          <label>Base URL<input id="asr-url" value="https://api.openai.com/v1"><small class="field-help">可填域名、/v1 或完整的 /v1/audio/transcriptions 地址，软件会自动规范化</small></label>
           <label>API Key<input id="asr-key" type="password" autocomplete="off"><small class="field-help">仅用于当前进程请求，不保存到任务记录</small></label>
         </div>
         <label>识别模型<div class="model-row"><select id="asr-model"></select><button type="button" id="refresh-asr">刷新模型</button></div><input id="asr-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="asr-model-help" class="field-help">medium：默认主识别模型，速度与准确率较均衡</small></label>

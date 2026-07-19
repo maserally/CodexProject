@@ -100,7 +100,7 @@ def run_remote_asr(
                             "end": round(end, 3),
                             "source": text,
                             "mean_word_probability": 0.9,
-                            "source": "openai_compatible_asr",
+                            "asr_source": "openai_compatible",
                         }
                     )
                 )

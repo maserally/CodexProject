@@ -18,12 +18,21 @@ def _json_from_text(text: str) -> dict[str, Any]:
     return json.loads(text)
 
 
+def normalize_openai_base_url(base_url: str) -> str:
+    """Accept a host, /v1 base, or a complete OpenAI-compatible endpoint."""
+    base = base_url.strip().rstrip("/")
+    for suffix in ("/audio/transcriptions", "/chat/completions", "/models"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+            break
+    if not base.endswith("/v1"):
+        base += "/v1"
+    return base
+
+
 class OpenAICompatibleProvider:
     def __init__(self, base_url: str, api_key: str = "", timeout: float = 300):
-        base = base_url.rstrip("/")
-        if not base.endswith("/v1"):
-            base += "/v1"
-        self.base_url = base
+        self.base_url = normalize_openai_base_url(base_url)
         self.headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self.client = httpx.Client(timeout=timeout, headers=self.headers)
 

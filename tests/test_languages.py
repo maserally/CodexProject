@@ -9,12 +9,28 @@ from pydantic import ValidationError
 
 from asr_stage import build_sentences
 from studio.main import _output_path, app, open_output
+from studio.providers import normalize_openai_base_url
 from studio.schemas import JobOptions, ProviderSettings
 from studio.subtitles import write_subtitles
 from studio.translation import audit_translation, safe_high_risk, translate_cues
 
 
 class LanguageSupportTests(unittest.TestCase):
+    def test_openai_base_url_accepts_root_v1_and_complete_endpoints(self):
+        expected = "https://letsgoapi.com/v1"
+        self.assertEqual(normalize_openai_base_url("https://letsgoapi.com"), expected)
+        self.assertEqual(normalize_openai_base_url("https://letsgoapi.com/v1/"), expected)
+        self.assertEqual(
+            normalize_openai_base_url(
+                "https://letsgoapi.com/v1/audio/transcriptions"
+            ),
+            expected,
+        )
+        self.assertEqual(
+            normalize_openai_base_url("https://letsgoapi.com/v1/chat/completions"),
+            expected,
+        )
+
     def test_job_options_accept_supported_languages(self):
         self.assertEqual(JobOptions(input_path="movie.mp4").source_language, "ja")
         self.assertEqual(
