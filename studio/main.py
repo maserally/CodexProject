@@ -51,7 +51,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.9.0")
+app = FastAPI(title="字幕翻译工作室", version="1.10.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -204,17 +204,20 @@ def create_job(options: JobOptions):
     return manager.create(options, worker if worker.enabled else None).public()
 
 
-def _video_files_in(folder_text: str) -> tuple[Path, list[Path]]:
+def _video_files_in(folder_text: str, recursive: bool = True) -> tuple[Path, list[Path]]:
     folder = Path(folder_text).expanduser().resolve()
     if not folder.exists() or not folder.is_dir():
         raise HTTPException(status_code=400, detail="输入文件夹不存在或不是文件夹")
+    candidates = folder.rglob("*") if recursive else folder.iterdir()
     files = sorted(
         (
             path.resolve()
-            for path in folder.iterdir()
-            if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+            for path in candidates
+            if path.is_file()
+            and path.suffix.lower() in VIDEO_EXTENSIONS
+            and path.resolve().is_relative_to(folder)
         ),
-        key=lambda path: path.name.casefold(),
+        key=lambda path: str(path.relative_to(folder)).casefold(),
     )
     if len(files) > MAX_BATCH_FILES:
         raise HTTPException(
@@ -226,11 +229,19 @@ def _video_files_in(folder_text: str) -> tuple[Path, list[Path]]:
 
 @app.post("/api/media/folder")
 def scan_media_folder(request: FolderScanRequest):
-    folder, files = _video_files_in(request.input_dir)
+    folder, files = _video_files_in(request.input_dir, request.recursive)
     return {
         "folder": str(folder),
         "count": len(files),
-        "files": [{"name": path.name, "path": str(path)} for path in files],
+        "recursive": request.recursive,
+        "files": [
+            {
+                "name": path.name,
+                "relative_path": str(path.relative_to(folder)),
+                "path": str(path),
+            }
+            for path in files
+        ],
     }
 
 
@@ -270,14 +281,15 @@ def pick_local_folder(request: FolderPickerRequest):
 
 @app.post("/api/jobs/batch")
 def create_folder_jobs(request: FolderBatchRequest):
-    folder, files = _video_files_in(request.input_dir)
+    folder, files = _video_files_in(request.input_dir, request.recursive)
     if not files:
-        raise HTTPException(status_code=400, detail="该文件夹第一层没有支持的视频文件")
+        scope = "及其子文件夹" if request.recursive else "第一层"
+        raise HTTPException(status_code=400, detail=f"该文件夹{scope}没有支持的视频文件")
     output_dir = None
     if request.output_dir:
         output_dir = Path(request.output_dir).expanduser().resolve()
-        if output_dir == folder:
-            raise HTTPException(status_code=400, detail="批量输出目录不能与输入目录完全相同")
+        if output_dir == folder or output_dir.is_relative_to(folder):
+            raise HTTPException(status_code=400, detail="批量输出目录不能位于输入目录内部")
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -286,21 +298,25 @@ def create_folder_jobs(request: FolderBatchRequest):
     worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
     base_options = resolve_provider_api_keys(request.options)
     created = []
-    used_output_names: set[str] = set()
+    used_output_names: dict[str, set[str]] = {}
     for media_path in files:
         options = base_options.model_copy(deep=True)
         options.input_path = str(media_path)
+        relative_parent = media_path.relative_to(folder).parent
+        job_output_dir = output_dir / relative_parent if output_dir else None
+        name_scope = str(relative_parent).casefold()
+        scoped_names = used_output_names.setdefault(name_scope, set())
         output_name = media_path.stem
-        if output_name.casefold() in used_output_names:
+        if output_name.casefold() in scoped_names:
             output_name = f"{media_path.stem}_{media_path.suffix.lstrip('.').lower()}"
         suffix_index = 2
         base_output_name = output_name
-        while output_name.casefold() in used_output_names:
+        while output_name.casefold() in scoped_names:
             output_name = f"{base_output_name}_{suffix_index}"
             suffix_index += 1
-        used_output_names.add(output_name.casefold())
+        scoped_names.add(output_name.casefold())
         options.output_name = output_name
-        options.output_dir = str(output_dir) if output_dir else ""
+        options.output_dir = str(job_output_dir) if job_output_dir else ""
         created.append(manager.create(options, worker if worker.enabled else None).public())
     return {"count": len(created), "folder": str(folder), "jobs": created}
 

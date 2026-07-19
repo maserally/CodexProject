@@ -11,7 +11,7 @@ from studio.schemas import FolderBatchRequest, JobOptions
 
 
 class BatchFolderTests(unittest.TestCase):
-    def test_folder_scan_reads_supported_top_level_videos_only(self):
+    def test_folder_scan_can_read_supported_top_level_videos_only(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "B.MKV").write_bytes(b"")
@@ -20,9 +20,22 @@ class BatchFolderTests(unittest.TestCase):
             nested = root / "nested"
             nested.mkdir()
             (nested / "hidden.mp4").write_bytes(b"")
-            resolved, files = _video_files_in(str(root))
+            resolved, files = _video_files_in(str(root), recursive=False)
             self.assertEqual(resolved, root.resolve())
             self.assertEqual([path.name for path in files], ["a.mp4", "B.MKV"])
+
+    def test_folder_scan_recurses_by_default_and_sorts_relative_paths(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "top.mp4").write_bytes(b"")
+            nested = root / "合集" / "作品"
+            nested.mkdir(parents=True)
+            (nested / "movie.mkv").write_bytes(b"")
+            _, files = _video_files_in(str(root))
+            self.assertEqual(
+                [str(path.relative_to(root)) for path in files],
+                [str(Path("top.mp4")), str(Path("合集") / "作品" / "movie.mkv")],
+            )
 
     def test_batch_creates_one_job_per_video_with_shared_output_dir(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -67,6 +80,53 @@ class BatchFolderTests(unittest.TestCase):
             request = FolderBatchRequest(
                 input_dir=str(root),
                 output_dir=str(root),
+                options=JobOptions(input_path=""),
+            )
+            with self.assertRaises(HTTPException) as raised:
+                create_folder_jobs(request)
+            self.assertEqual(raised.exception.status_code, 400)
+
+    def test_recursive_batch_preserves_subfolders_and_same_names(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source"
+            output = root / "output"
+            first = source / "第一部"
+            second = source / "第二部"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "movie.mp4").write_bytes(b"")
+            (second / "movie.mp4").write_bytes(b"")
+            captured = []
+
+            def fake_create(options, worker):
+                captured.append(options)
+                return SimpleNamespace(public=lambda: {"input": options.input_path})
+
+            request = FolderBatchRequest(
+                input_dir=str(source),
+                output_dir=str(output),
+                options=JobOptions(input_path=""),
+            )
+            with patch("studio.main.manager.create", side_effect=fake_create), patch(
+                "studio.main.load_provider_settings", return_value={"cloud_worker": {}}
+            ):
+                result = create_folder_jobs(request)
+
+            self.assertEqual(result["count"], 2)
+            self.assertEqual([item.output_name for item in captured], ["movie", "movie"])
+            self.assertEqual(
+                [Path(item.output_dir) for item in captured],
+                [output.resolve() / "第一部", output.resolve() / "第二部"],
+            )
+
+    def test_batch_rejects_output_nested_under_input(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "one.mp4").write_bytes(b"")
+            request = FolderBatchRequest(
+                input_dir=str(root),
+                output_dir=str(root / "outputs"),
                 options=JobOptions(input_path=""),
             )
             with self.assertRaises(HTTPException) as raised:

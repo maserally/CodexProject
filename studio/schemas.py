@@ -69,6 +69,7 @@ class JobOptions(BaseModel):
 
 class FolderScanRequest(BaseModel):
     input_dir: str
+    recursive: bool = True
 
     @field_validator("input_dir", mode="before")
     @classmethod
@@ -89,6 +90,7 @@ class FolderPickerRequest(BaseModel):
 class FolderBatchRequest(BaseModel):
     input_dir: str
     output_dir: str = ""
+    recursive: bool = True
     options: JobOptions
 
     @field_validator("input_dir", "output_dir", mode="before")

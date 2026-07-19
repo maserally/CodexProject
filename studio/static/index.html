@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.9.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.10.0">
 </head>
 <body>
   <main class="shell">
@@ -38,7 +38,8 @@
         <small id="upload-status">大文件会流式保存到本地任务目录</small>
       </div>
       <div id="folder-source" class="source-view">
-        <label>视频文件夹<div class="model-row"><input id="input-folder" placeholder="E:\Videos\待处理"><button id="pick-input-folder" type="button">选择文件夹</button><button id="scan-input-folder" type="button">扫描视频</button></div><small class="field-help">自动读取该文件夹第一层的 MP4、MKV、AVI、MOV、M4V、WebM、TS、M2TS、WMV 和 FLV 文件</small></label>
+        <label>视频文件夹<div class="model-row"><input id="input-folder" placeholder="E:\Videos\待处理"><button id="pick-input-folder" type="button">选择文件夹</button><button id="scan-input-folder" type="button">扫描视频</button></div><small class="field-help">支持 MP4、MKV、AVI、MOV、M4V、WebM、TS、M2TS、WMV 和 FLV 文件</small></label>
+        <label class="switch-label"><input id="recursive-folder" type="checkbox" checked>包含所有子文件夹<small class="field-help">关闭后仅扫描所选文件夹第一层；指定输出文件夹时会保留原有子目录结构</small></label>
         <div id="folder-scan-status" class="model-status">填写文件夹后可先扫描确认文件数量</div>
       </div>
     </section>
@@ -140,6 +141,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.9.0"></script>
+  <script src="/static/app.js?v=1.10.0"></script>
 </body>
 </html>
