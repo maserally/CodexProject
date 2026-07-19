@@ -128,6 +128,19 @@ class LanguageSupportTests(unittest.TestCase):
                 _output_path("safe-job", "subtitle")
             self.assertEqual(raised.exception.status_code, 403)
 
+            external_dir = root / "external-output"
+            external_dir.mkdir()
+            external = external_dir / "subtitle.srt"
+            external.write_text("external", encoding="utf-8")
+            external_job = SimpleNamespace(
+                outputs={"subtitle": str(external)},
+                options=SimpleNamespace(output_dir=str(external_dir)),
+            )
+            with patch("studio.main.JOBS_DIR", root), patch(
+                "studio.main.manager.get", return_value=external_job
+            ):
+                self.assertEqual(_output_path("safe-job", "subtitle"), external.resolve())
+
 
 if __name__ == "__main__":
     unittest.main()

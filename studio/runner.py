@@ -432,7 +432,11 @@ class JobManager:
             raise FileNotFoundError(f"输入视频不存在：{media}")
         job_dir = JOBS_DIR / job.id
         workdir = job_dir / "work"
-        output_dir = job_dir / "output"
+        output_dir = (
+            Path(options.output_dir).expanduser().resolve()
+            if options.output_dir
+            else job_dir / "output"
+        )
         workdir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
         raw_stem = options.output_name.strip() or media.stem

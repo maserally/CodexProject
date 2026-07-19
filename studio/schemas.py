@@ -29,6 +29,7 @@ class CloudWorkerSettings(BaseModel):
 class JobOptions(BaseModel):
     input_path: str
     output_name: str = ""
+    output_dir: str = ""
     source_language: SourceLanguage = "ja"
     target_language: Literal["zh-CN"] = "zh-CN"
     profile: QualityProfile = "balanced"
@@ -51,7 +52,7 @@ class JobOptions(BaseModel):
     create_soft_subtitle_video: bool = True
     create_hard_subtitle_video: bool = False
 
-    @field_validator("input_path", mode="before")
+    @field_validator("input_path", "output_dir", mode="before")
     @classmethod
     def clean_input_path(cls, value):
         text = str(value or "").strip()
@@ -64,6 +65,26 @@ class JobOptions(BaseModel):
                     text = text[len(left) : -len(right)].strip()
                     changed = True
         return text
+
+
+class FolderScanRequest(BaseModel):
+    input_dir: str
+
+    @field_validator("input_dir", mode="before")
+    @classmethod
+    def clean_input_dir(cls, value):
+        return JobOptions.clean_input_path(value)
+
+
+class FolderBatchRequest(BaseModel):
+    input_dir: str
+    output_dir: str = ""
+    options: JobOptions
+
+    @field_validator("input_dir", "output_dir", mode="before")
+    @classmethod
+    def clean_directories(cls, value):
+        return JobOptions.clean_input_path(value)
 
 
 class ModelListRequest(BaseModel):

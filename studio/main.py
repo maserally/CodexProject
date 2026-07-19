@@ -36,6 +36,8 @@ from .runner import JOBS_DIR, UPLOADS_DIR, manager
 from .schemas import (
     CloudWorkerRequest,
     CloudWorkerSettings,
+    FolderBatchRequest,
+    FolderScanRequest,
     JobOptions,
     ModelListRequest,
     SavedProviderSettings,
@@ -48,8 +50,13 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.7.0")
+app = FastAPI(title="字幕翻译工作室", version="1.8.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
+
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ts", ".m2ts", ".wmv", ".flv",
+}
+MAX_BATCH_FILES = 500
 
 
 @app.middleware("http")
@@ -184,9 +191,83 @@ def create_job(options: JobOptions):
     path = Path(options.input_path)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=400, detail="输入视频不存在或不是文件")
+    if options.output_dir:
+        output_dir = Path(options.output_dir).expanduser().resolve()
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法创建输出目录：{exc}") from exc
+        options.output_dir = str(output_dir)
     saved = load_provider_settings(expose_secrets=True)
     worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
     return manager.create(options, worker if worker.enabled else None).public()
+
+
+def _video_files_in(folder_text: str) -> tuple[Path, list[Path]]:
+    folder = Path(folder_text).expanduser().resolve()
+    if not folder.exists() or not folder.is_dir():
+        raise HTTPException(status_code=400, detail="输入文件夹不存在或不是文件夹")
+    files = sorted(
+        (
+            path.resolve()
+            for path in folder.iterdir()
+            if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件夹包含 {len(files)} 个视频，单次最多创建 {MAX_BATCH_FILES} 个任务",
+        )
+    return folder, files
+
+
+@app.post("/api/media/folder")
+def scan_media_folder(request: FolderScanRequest):
+    folder, files = _video_files_in(request.input_dir)
+    return {
+        "folder": str(folder),
+        "count": len(files),
+        "files": [{"name": path.name, "path": str(path)} for path in files],
+    }
+
+
+@app.post("/api/jobs/batch")
+def create_folder_jobs(request: FolderBatchRequest):
+    folder, files = _video_files_in(request.input_dir)
+    if not files:
+        raise HTTPException(status_code=400, detail="该文件夹第一层没有支持的视频文件")
+    output_dir = None
+    if request.output_dir:
+        output_dir = Path(request.output_dir).expanduser().resolve()
+        if output_dir == folder:
+            raise HTTPException(status_code=400, detail="批量输出目录不能与输入目录完全相同")
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法创建输出目录：{exc}") from exc
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    base_options = resolve_provider_api_keys(request.options)
+    created = []
+    used_output_names: set[str] = set()
+    for media_path in files:
+        options = base_options.model_copy(deep=True)
+        options.input_path = str(media_path)
+        output_name = media_path.stem
+        if output_name.casefold() in used_output_names:
+            output_name = f"{media_path.stem}_{media_path.suffix.lstrip('.').lower()}"
+        suffix_index = 2
+        base_output_name = output_name
+        while output_name.casefold() in used_output_names:
+            output_name = f"{base_output_name}_{suffix_index}"
+            suffix_index += 1
+        used_output_names.add(output_name.casefold())
+        options.output_name = output_name
+        options.output_dir = str(output_dir) if output_dir else ""
+        created.append(manager.create(options, worker if worker.enabled else None).public())
+    return {"count": len(created), "folder": str(folder), "jobs": created}
 
 
 @app.post("/api/cloud-worker/test")
@@ -270,8 +351,12 @@ def _output_path(job_id: str, output_key: str) -> Path:
         raise HTTPException(status_code=404, detail="产物不存在")
     path = Path(job.outputs[output_key]).resolve()
     job_root = (JOBS_DIR / job_id).resolve()
-    if not path.is_relative_to(job_root):
-        raise HTTPException(status_code=403, detail="产物路径不在任务目录内")
+    allowed_roots = [job_root]
+    configured_output = getattr(getattr(job, "options", None), "output_dir", "")
+    if configured_output:
+        allowed_roots.append(Path(configured_output).expanduser().resolve())
+    if not any(path.is_relative_to(root) for root in allowed_roots):
+        raise HTTPException(status_code=403, detail="产物路径不在任务或指定输出目录内")
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="产物文件已不存在")
     return path
@@ -303,9 +388,15 @@ def open_output_folder(job_id: str):
     job = manager.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务不存在")
-    folder = (JOBS_DIR / job_id / "output").resolve()
+    configured_output = getattr(job.options, "output_dir", "")
+    folder = (
+        Path(configured_output).expanduser().resolve()
+        if configured_output
+        else (JOBS_DIR / job_id / "output").resolve()
+    )
     job_root = (JOBS_DIR / job_id).resolve()
-    if not folder.is_relative_to(job_root) or not folder.exists():
+    allowed = folder.is_relative_to(job_root) or bool(configured_output)
+    if not allowed or not folder.exists() or not folder.is_dir():
         raise HTTPException(status_code=404, detail="产物文件夹不存在")
     _open_local(folder)
     return {"ok": True, "path": str(folder)}

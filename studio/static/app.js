@@ -27,13 +27,17 @@ const saveProviderButton=$('#save-provider-settings');if(saveProviderButton)save
 function cleanInputPath(value){let path=String(value||'').trim();const pairs=[['"','"'],["'","'"],['“','”'],['‘','’']];let changed=true;while(changed&&path.length>1){changed=false;for(const [left,right] of pairs){if(path.startsWith(left)&&path.endsWith(right)){path=path.slice(left.length,-right.length).trim();changed=true}}}if(/^file:\/\//i.test(path)){try{path=decodeURIComponent(new URL(path).pathname).replace(/^\/(?:([A-Za-z]:))/,'$1')}catch{}}if(/^[A-Za-z]:\//.test(path))path=path.replaceAll('/','\\');return path}
 function cleanPathField(){const input=$('#input-path'),before=input.value,after=cleanInputPath(before);input.value=after;const status=$('#path-clean-status');if(status)status.textContent=before===after?'路径格式无需修改':'已移除外层引号或多余空格';return after}
 const cleanPathButton=$('#clean-input-path');if(cleanPathButton)cleanPathButton.onclick=cleanPathField;const inputPath=$('#input-path');if(inputPath)inputPath.addEventListener('blur',cleanPathField);
+function cleanFolderField(id){const input=$(id);input.value=cleanInputPath(input.value);return input.value}
+$('#input-folder').addEventListener('blur',()=>cleanFolderField('#input-folder'));$('#output-dir').addEventListener('blur',()=>cleanFolderField('#output-dir'));
+async function scanInputFolder(){const status=$('#folder-scan-status'),input_dir=cleanFolderField('#input-folder');if(!input_dir){status.textContent='请先填写视频文件夹';return null}status.textContent='正在扫描…';try{const data=await jsonFetch('/api/media/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input_dir})});status.textContent=data.count?`找到 ${data.count} 个视频：${data.files.slice(0,6).map(x=>x.name).join('、')}${data.count>6?'…':''}`:'该文件夹第一层没有支持的视频文件';return data}catch(e){status.textContent=`扫描失败：${e.message}`;return null}}
+$('#scan-input-folder').onclick=scanInputFolder;
 
 async function init(){
   runtimeInfo=await jsonFetch('/api/runtime');
   if(runtimeInfo.mode==='cloud'){
     sourceMode='upload';
     $('#cloud-notice').classList.remove('hidden');
-    const pathTab=$('.tab[data-mode=path]');if(pathTab)pathTab.classList.add('hidden');
+    $$('.tab[data-mode=path],.tab[data-mode=folder]').forEach(x=>x.classList.add('hidden'));
     $$('.tab').forEach(x=>x.classList.toggle('active',x.dataset.mode==='upload'));
     $$('.source-view').forEach(x=>x.classList.toggle('active',x.id==='upload-source'));
     $('#soft-video').checked=false;$('#hard-video').checked=false;
@@ -61,7 +65,7 @@ async function init(){
   renderJobs(); setInterval(renderJobs,2500);
 }
 
-$$('.tab').forEach(btn=>btn.onclick=()=>{sourceMode=btn.dataset.mode;$$('.tab').forEach(x=>x.classList.toggle('active',x===btn));$$('.source-view').forEach(x=>x.classList.remove('active'));$(`#${sourceMode}-source`).classList.add('active')});
+$$('.tab').forEach(btn=>btn.onclick=()=>{sourceMode=btn.dataset.mode;$$('.tab').forEach(x=>x.classList.toggle('active',x===btn));$$('.source-view').forEach(x=>x.classList.remove('active'));$(`#${sourceMode}-source`).classList.add('active');$('#output-name').disabled=sourceMode==='folder';$('#output-name').placeholder=sourceMode==='folder'?'批量模式自动使用各视频文件名':'默认使用视频文件名'});
 $$('input[name=profile]').forEach(x=>x.onchange=()=>$$('.profile').forEach(p=>p.classList.toggle('selected',p.contains(x)&&x.checked)));
 
 function syncProviderFields(){
@@ -124,7 +128,7 @@ async function uploadIfNeeded(){
 
 $('#start').onclick=async()=>{
   $('#form-error').textContent=''; $('#start').disabled=true;
-  try{const input_path=await uploadIfNeeded();const asrKind=$('#asr-kind').value, transKind=$('#translator-kind').value,reviewKind=$('#text-reviewer-kind').value;const asrModel=modelValue('#asr-model'),translatorModel=modelValue('#translator-model'),reviewModel=modelValue('#text-reviewer-model'),worker=cloudWorkerBody();if(!asrModel||!translatorModel||!reviewModel)throw new Error('请选择或输入识别、翻译和自动校正模型');if(worker.enabled&&asrKind!=='local_whisper')throw new Error('云 GPU 运算单元用于 Whisper 识别，请将识别提供方设为本地 Whisper');if(worker.enabled&&(!worker.host||(!worker.password&&!worker.private_key_path)))throw new Error('请填写云服务器地址，以及 SSH 密码或私钥路径');await saveProviderSettings(false);const body={input_path,output_name:$('#output-name').value.trim(),source_language:$('#source-language').value,target_language:'zh-CN',profile:$('input[name=profile]:checked').value,asr:{kind:asrKind,base_url:asrKind==='openai_compatible'?$('#asr-url').value:'',api_key:$('#asr-key').value,model:asrModel},verifier_model:modelValue('#verifier-model'),translator:{kind:transKind,base_url:$('#translator-url').value,api_key:$('#translator-key').value,model:translatorModel},text_reviewer:{kind:reviewKind,base_url:$('#text-reviewer-url').value,api_key:$('#text-reviewer-key').value,model:reviewModel},remove_chinese_periods:$('#remove-periods').checked,publish_mode:$('#publish-mode').checked,create_soft_subtitle_video:$('#soft-video').checked,create_hard_subtitle_video:$('#hard-video').checked};await jsonFetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await renderJobs()}catch(e){$('#form-error').textContent=e.message}finally{$('#start').disabled=false}
+  try{const asrKind=$('#asr-kind').value,transKind=$('#translator-kind').value,reviewKind=$('#text-reviewer-kind').value,asrModel=modelValue('#asr-model'),translatorModel=modelValue('#translator-model'),reviewModel=modelValue('#text-reviewer-model'),worker=cloudWorkerBody(),output_dir=cleanFolderField('#output-dir');if(!asrModel||!translatorModel||!reviewModel)throw new Error('请选择或输入识别、翻译和自动校正模型');if(worker.enabled&&asrKind!=='local_whisper')throw new Error('云 GPU 运算单元用于 Whisper 识别，请将识别提供方设为本地 Whisper');if(worker.enabled&&(!worker.host||(!worker.password&&!worker.private_key_path)))throw new Error('请填写云服务器地址，以及 SSH 密码或私钥路径');await saveProviderSettings(false);const makeBody=input_path=>({input_path,output_name:sourceMode==='folder'?'':$('#output-name').value.trim(),output_dir,source_language:$('#source-language').value,target_language:'zh-CN',profile:$('input[name=profile]:checked').value,asr:{kind:asrKind,base_url:asrKind==='openai_compatible'?$('#asr-url').value:'',api_key:$('#asr-key').value,model:asrModel},verifier_model:modelValue('#verifier-model'),translator:{kind:transKind,base_url:$('#translator-url').value,api_key:$('#translator-key').value,model:translatorModel},text_reviewer:{kind:reviewKind,base_url:$('#text-reviewer-url').value,api_key:$('#text-reviewer-key').value,model:reviewModel},remove_chinese_periods:$('#remove-periods').checked,publish_mode:$('#publish-mode').checked,create_soft_subtitle_video:$('#soft-video').checked,create_hard_subtitle_video:$('#hard-video').checked});if(sourceMode==='folder'){const input_dir=cleanFolderField('#input-folder');if(!input_dir)throw new Error('请填写视频文件夹');const data=await jsonFetch('/api/jobs/batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input_dir,output_dir,options:makeBody('')})});$('#folder-scan-status').textContent=`已创建 ${data.count} 个任务，将按队列逐个处理`}else{const input_path=await uploadIfNeeded();await jsonFetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(makeBody(input_path))})}await renderJobs()}catch(e){$('#form-error').textContent=e.message}finally{$('#start').disabled=false}
 };
 
 function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
@@ -132,7 +136,7 @@ async function jobAction(id,action){try{await jsonFetch(`/api/jobs/${id}/${actio
 async function pauseJob(id){await jobAction(id,'pause')}
 async function resumeJob(id){await jobAction(id,'resume')}
 async function cancelJob(id){if(confirm('确定取消这个任务？当前阶段会停止，已生成的中间文件会保留到你删除任务为止。'))await jobAction(id,'cancel')}
-async function deleteJob(id){if(!confirm('永久删除这条任务及其本地中间文件和产物？若视频由网页上传，未被其他任务使用的上传副本也会删除。此操作不可恢复。'))return;try{await jsonFetch(`/api/jobs/${id}`,{method:'DELETE'});[...openJobDetails].filter(x=>x.startsWith(`${id}:`)).forEach(x=>openJobDetails.delete(x));await renderJobs()}catch(e){alert(e.message)}}
+async function deleteJob(id){if(!confirm('永久删除这条任务及其任务目录？指定到外部输出文件夹的产物会保留；网页上传且未被其他任务使用的素材副本会删除。此操作不可恢复。'))return;try{await jsonFetch(`/api/jobs/${id}`,{method:'DELETE'});[...openJobDetails].filter(x=>x.startsWith(`${id}:`)).forEach(x=>openJobDetails.delete(x));await renderJobs()}catch(e){alert(e.message)}}
 async function openOutput(id,key){try{await jsonFetch(`/api/jobs/${id}/open/${encodeURIComponent(key)}`,{method:'POST'})}catch(e){alert(`打开失败：${e.message}`)}}
 async function openOutputFolder(id){try{await jsonFetch(`/api/jobs/${id}/open-folder`,{method:'POST'})}catch(e){alert(`打开文件夹失败：${e.message}`)}}
 function detailMarkup(id,type,title,content,titleClass=''){const key=`${id}:${type}`;return`<details data-open-key="${key}" ${openJobDetails.has(key)?'open':''}><summary class="${titleClass}">${title}</summary><pre class="logs">${esc(content)}</pre></details>`}
