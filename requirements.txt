@@ -10,4 +10,4 @@ transformers
 openai-whisper
 webrtcvad
 numpy
-
+psutil

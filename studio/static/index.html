@@ -65,7 +65,7 @@
         </label>
         <div class="remote-fields hidden" data-for="asr">
           <label>Base URL<input id="asr-url" value="https://api.openai.com/v1"><small class="field-help">可填域名、/v1 或完整的 /v1/audio/transcriptions 地址，软件会自动规范化</small></label>
-          <label>API Key<input id="asr-key" type="password" autocomplete="off"><small class="field-help">仅用于当前进程请求，不保存到任务记录</small></label>
+          <label>API Key<input id="asr-key" type="password" autocomplete="off"><small class="field-help">保存接口配置时使用 Windows 当前用户加密并写入本地配置，不进入任务记录或 Git</small></label>
         </div>
         <label>识别模型<div class="model-row"><select id="asr-model"></select><button type="button" id="refresh-asr">刷新模型</button></div><input id="asr-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="asr-model-help" class="field-help">medium：默认主识别模型，速度与准确率较均衡</small></label>
         <div id="installed-whisper" class="model-status">正在读取本机模型…</div>
@@ -80,10 +80,16 @@
         </label>
         <label>Base URL<input id="translator-url" value="http://127.0.0.1:11434"><small class="field-help">Ollama 默认地址为 http://127.0.0.1:11434；兼容服务通常以 /v1 结尾</small></label>
         <div class="remote-fields hidden" data-for="translator">
-          <label>API Key<input id="translator-key" type="password" autocomplete="off"><small class="field-help">只在当前任务中使用，任务状态文件中会被清空</small></label>
+          <label>API Key<input id="translator-key" type="password" autocomplete="off"><small class="field-help">保存接口配置时使用 Windows 当前用户加密并写入本地配置，任务状态文件中仍会清空</small></label>
         </div>
         <label>翻译模型<div class="model-row"><select id="translator-model"></select><button type="button" id="refresh-translator">刷新模型</button></div><input id="translator-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="translator-model-help" class="field-help">逐句翻译为中文，并额外审计否定、制止和等待等高风险语义</small></label>
       </div>
+    </section>
+
+    <section class="panel provider-storage">
+      <div><h2>5. 本地接口配置</h2><p class="muted">保存到 studio_data/settings/provider_settings.json；API Key 使用当前 Windows 用户的 DPAPI 加密，文件不会提交到 Git。</p></div>
+      <button id="save-provider-settings">保存接口配置</button>
+      <span id="provider-save-status" class="muted"></span>
     </section>
 
     <section class="panel launch">

@@ -39,3 +39,9 @@ class JobOptions(BaseModel):
 
 class ModelListRequest(BaseModel):
     provider: ProviderSettings
+
+
+class SavedProviderSettings(BaseModel):
+    asr: ProviderSettings
+    translator: ProviderSettings
+    verifier_model: str = "large-v3"

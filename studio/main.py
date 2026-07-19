@@ -19,11 +19,12 @@ from .providers import (
     whisper_model_catalog,
 )
 from .runner import JOBS_DIR, UPLOADS_DIR, manager
-from .schemas import JobOptions, ModelListRequest
+from .schemas import JobOptions, ModelListRequest, SavedProviderSettings
+from .settings_store import load_provider_settings, save_provider_settings
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.3.1")
+app = FastAPI(title="字幕翻译工作室", version="1.4.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 
@@ -87,6 +88,17 @@ def provider_models(request: ModelListRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/settings/providers")
+def get_provider_settings():
+    return load_provider_settings()
+
+
+@app.put("/api/settings/providers")
+def put_provider_settings(settings: SavedProviderSettings):
+    path = save_provider_settings(settings.model_dump())
+    return {"ok": True, "path": str(path)}
+
+
 @app.post("/api/uploads")
 async def upload(file: UploadFile = File(...)):
     safe_name = re.sub(r"[^\w.()\-\u4e00-\u9fff]+", "_", file.filename or "video.mp4")
@@ -124,14 +136,38 @@ def get_job(job_id: str):
 
 
 @app.delete("/api/jobs/{job_id}")
-def archive_job(job_id: str):
+def delete_job(job_id: str):
     try:
-        archived_to = manager.archive(job_id)
-        return {"ok": True, "archived_to": str(archived_to)}
+        deleted = manager.delete(job_id)
+        return {"ok": True, "deleted": str(deleted)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务不存在") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _job_action(job_id: str, action: str):
+    try:
+        return getattr(manager, action)(job_id).public()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/jobs/{job_id}/pause")
+def pause_job(job_id: str):
+    return _job_action(job_id, "pause")
+
+
+@app.post("/api/jobs/{job_id}/resume")
+def resume_job(job_id: str):
+    return _job_action(job_id, "resume")
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    return _job_action(job_id, "cancel")
 
 
 @app.get("/api/jobs/{job_id}/download/{output_key}")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -12,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from .languages import language_info
 from .quality import PROFILE_SETTINGS, finalize_cues, quality_summary
@@ -33,6 +36,26 @@ DATA_DIR = ROOT / "studio_data"
 JOBS_DIR = DATA_DIR / "jobs"
 UPLOADS_DIR = DATA_DIR / "uploads"
 GPU_LOCK = threading.Lock()
+
+
+class JobCancelled(RuntimeError):
+    pass
+
+
+def _open_gate():
+    gate = threading.Event()
+    gate.set()
+    return gate
+
+
+@dataclass
+class JobControl:
+    run_gate: threading.Event = field(default_factory=_open_gate)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    finished_event: threading.Event = field(default_factory=threading.Event)
+    process: subprocess.Popen | None = None
+    previous_status: str = "queued"
+    previous_stage: str = "等待处理"
 
 
 def _now():
@@ -75,6 +98,7 @@ class JobManager:
         JOBS_DIR.mkdir(parents=True, exist_ok=True)
         UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         self.jobs: dict[str, JobState] = {}
+        self.controls: dict[str, JobControl] = {}
         self.lock = threading.Lock()
         self._load_existing()
 
@@ -86,7 +110,7 @@ class JobManager:
                 status = data.get("status", "failed")
                 stage = data.get("stage", "")
                 error = data.get("error", "")
-                if status in {"queued", "running"}:
+                if status in {"queued", "running", "paused"}:
                     status = "failed"
                     stage = "上次运行被中断"
                     error = "软件上次关闭时任务尚未完成，请重新创建任务"
@@ -110,6 +134,7 @@ class JobManager:
         job = JobState(id=uuid.uuid4().hex[:12], options=options)
         with self.lock:
             self.jobs[job.id] = job
+            self.controls[job.id] = JobControl()
         self.persist(job)
         threading.Thread(target=self._run_guarded, args=(job,), daemon=True).start()
         return job
@@ -125,7 +150,7 @@ class JobManager:
             job = self.jobs.get(job_id)
             if not job:
                 raise KeyError(job_id)
-            if job.status in {"queued", "running"}:
+            if job.status in {"queued", "running", "paused"}:
                 raise RuntimeError("运行中的任务不能移除")
             self.jobs.pop(job_id)
         source = JOBS_DIR / job_id
@@ -135,6 +160,126 @@ class JobManager:
         if source.exists():
             source.replace(target)
         return target
+
+    def _control(self, job_id: str) -> JobControl:
+        with self.lock:
+            control = self.controls.get(job_id)
+        if not control:
+            raise RuntimeError("该任务当前没有可控制的运行进程")
+        return control
+
+    @staticmethod
+    def _processes(process: subprocess.Popen | None):
+        if not process or process.poll() is not None:
+            return []
+        try:
+            parent = psutil.Process(process.pid)
+            return [*parent.children(recursive=True), parent]
+        except psutil.Error:
+            return []
+
+    def pause(self, job_id: str):
+        job = self.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        if job.status not in {"queued", "running"}:
+            raise RuntimeError("只有等待中或运行中的任务可以暂停")
+        control = self._control(job_id)
+        control.previous_status = job.status
+        control.previous_stage = job.stage
+        control.run_gate.clear()
+        for process in self._processes(control.process):
+            try:
+                process.suspend()
+            except psutil.Error:
+                pass
+        self.update(job, status="paused", stage=f"已暂停 · {control.previous_stage}", log="任务已暂停")
+        return job
+
+    def resume(self, job_id: str):
+        job = self.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        if job.status != "paused":
+            raise RuntimeError("任务当前没有暂停")
+        control = self._control(job_id)
+        for process in reversed(self._processes(control.process)):
+            try:
+                process.resume()
+            except psutil.Error:
+                pass
+        control.run_gate.set()
+        self.update(
+            job,
+            status=control.previous_status,
+            stage=control.previous_stage,
+            log="任务已继续",
+        )
+        return job
+
+    def cancel(self, job_id: str):
+        job = self.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        if job.status not in {"queued", "running", "paused"}:
+            raise RuntimeError("任务已经结束")
+        control = self._control(job_id)
+        control.cancel_event.set()
+        control.run_gate.set()
+        processes = self._processes(control.process)
+        for process in processes:
+            try:
+                process.terminate()
+            except psutil.Error:
+                pass
+        if processes:
+            _, alive = psutil.wait_procs(processes, timeout=3)
+            for process in alive:
+                try:
+                    process.kill()
+                except psutil.Error:
+                    pass
+        self.update(job, status="canceled", stage="任务已取消", log="任务已取消，可安全删除")
+        return job
+
+    def delete(self, job_id: str):
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job.status in {"queued", "running", "paused"}:
+                raise RuntimeError("请先取消正在运行或暂停的任务")
+            control = self.controls.get(job_id)
+            if control and not control.finished_event.is_set():
+                raise RuntimeError("任务正在停止并清理资源，请稍候再删除")
+            input_path = Path(job.options.input_path).resolve()
+            other_inputs = {
+                Path(other.options.input_path).resolve()
+                for other_id, other in self.jobs.items()
+                if other_id != job_id
+            }
+            self.jobs.pop(job_id)
+            self.controls.pop(job_id, None)
+        target = (JOBS_DIR / job_id).resolve()
+        if target.parent != JOBS_DIR.resolve():
+            raise RuntimeError("任务目录不安全，拒绝删除")
+        if target.exists():
+            shutil.rmtree(target)
+        uploads_root = UPLOADS_DIR.resolve()
+        if input_path.is_relative_to(uploads_root) and input_path not in other_inputs:
+            relative = input_path.relative_to(uploads_root)
+            upload_dir = uploads_root / relative.parts[0]
+            if upload_dir.parent == uploads_root and upload_dir.exists():
+                shutil.rmtree(upload_dir)
+        return target
+
+    def checkpoint(self, job: JobState):
+        control = self._control(job.id)
+        while not control.run_gate.wait(0.25):
+            if control.cancel_event.is_set():
+                raise JobCancelled("任务已取消")
+        if control.cancel_event.is_set():
+            raise JobCancelled("任务已取消")
 
     def persist(self, job: JobState):
         folder = JOBS_DIR / job.id
@@ -156,14 +301,41 @@ class JobManager:
         self.persist(job)
 
     def _run_guarded(self, job: JobState):
-        with GPU_LOCK:
+        control = self._control(job.id)
+        acquired = False
+        try:
+            while not acquired:
+                self.checkpoint(job)
+                acquired = GPU_LOCK.acquire(timeout=0.25)
             try:
                 self.run_pipeline(job)
+            except JobCancelled:
+                if job.status != "canceled":
+                    self.update(job, status="canceled", stage="任务已取消", log="任务已取消")
             except Exception as exc:
-                job.error = str(exc)
-                self.update(job, status="failed", stage="处理失败", log=traceback.format_exc())
+                control = self.controls.get(job.id)
+                if control and control.cancel_event.is_set():
+                    if job.status != "canceled":
+                        self.update(job, status="canceled", stage="任务已取消", log="任务已取消")
+                else:
+                    job.error = str(exc)
+                    self.update(job, status="failed", stage="处理失败", log=traceback.format_exc())
+        except JobCancelled:
+            if job.status != "canceled":
+                self.update(job, status="canceled", stage="任务已取消", log="任务已取消")
+        finally:
+            if acquired:
+                GPU_LOCK.release()
+            control.finished_event.set()
 
-    def run_command(self, job: JobState, command: list[str], env: dict[str, str] | None = None):
+    def run_command(
+        self,
+        job: JobState,
+        command: list[str],
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+    ):
+        self.checkpoint(job)
         merged_env = os.environ.copy()
         merged_env["PYTHONUNBUFFERED"] = "1"
         merged_env["HF_HOME"] = str(ROOT / "hf_cache")
@@ -171,7 +343,7 @@ class JobManager:
             merged_env.update(env)
         process = subprocess.Popen(
             command,
-            cwd=str(ROOT),
+            cwd=str(cwd or ROOT),
             env=merged_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -179,12 +351,19 @@ class JobManager:
             encoding="utf-8",
             errors="replace",
         )
+        control = self._control(job.id)
+        control.process = process
         assert process.stdout is not None
-        for line in process.stdout:
-            line = line.strip()
-            if line and not re.match(r"^\s*\d+%", line):
-                self.update(job, log=line[-600:])
-        code = process.wait()
+        try:
+            for line in process.stdout:
+                line = line.strip()
+                if line and not re.match(r"^\s*\d+%", line):
+                    self.update(job, log=line[-600:])
+            code = process.wait()
+        finally:
+            process.stdout.close()
+            control.process = None
+        self.checkpoint(job)
         if code:
             raise RuntimeError(f"命令执行失败（退出码 {code}）：{' '.join(command[:3])}")
 
@@ -202,6 +381,7 @@ class JobManager:
         return float(result.stdout.strip())
 
     def run_pipeline(self, job: JobState):
+        self.checkpoint(job)
         options = job.options
         media = Path(options.input_path).resolve()
         if not media.exists() or not media.is_file():
@@ -250,6 +430,12 @@ class JobManager:
                 ],
             )
         elif options.asr.kind == "openai_compatible":
+            def remote_progress(current, total, text):
+                self.checkpoint(job)
+                self.update(
+                    job, progress=0.25 + 0.20 * current / max(1, total), log=text
+                )
+
             run_remote_asr(
                 media,
                 events,
@@ -258,9 +444,7 @@ class JobManager:
                 profile["speech_threshold"],
                 profile["nonlexical_factor"],
                 options.source_language,
-                lambda current, total, text: self.update(
-                    job, progress=0.25 + 0.20 * current / max(1, total), log=text
-                ),
+                remote_progress,
             )
         else:
             raise ValueError(f"不支持的 ASR 提供方：{options.asr.kind}")
@@ -354,12 +538,18 @@ class JobManager:
                     recovered_count = len(primary) - before_recovery
 
         self.update(job, stage="逐句翻译与否定词审计", progress=0.70)
+        def translation_progress(current, total, _):
+            self.checkpoint(job)
+            self.update(
+                job,
+                progress=0.70 + 0.16 * current / max(1, total),
+                log=(f"翻译 {current}/{total}" if current % 10 == 0 else None),
+            )
+
         translated = translate_cues(
             primary,
             options.translator,
-            lambda current, total, _: self.update(
-                job, progress=0.70 + 0.16 * current / max(1, total), log=(f"翻译 {current}/{total}" if current % 10 == 0 else None)
-            ),
+            translation_progress,
             source_language=options.source_language,
             target_language=options.target_language,
         )
@@ -408,7 +598,13 @@ class JobManager:
         if options.create_soft_subtitle_video and final_cues:
             self.update(job, stage="封装软字幕视频", progress=0.90)
             video_out = output_dir / f"{stem}_中文字幕软字幕.mp4"
-            mux_soft_subtitles(media, final_files["cn_srt"], video_out, "简体中文")
+            mux_soft_subtitles(
+                media,
+                final_files["cn_srt"],
+                video_out,
+                "简体中文",
+                run=lambda command, cwd=None: self.run_command(job, command, cwd=cwd),
+            )
             job.outputs["soft_video"] = str(video_out)
         elif options.create_soft_subtitle_video:
             self.update(job, log="未检测到可靠对白，跳过软字幕视频封装")
@@ -416,7 +612,12 @@ class JobManager:
         if options.create_hard_subtitle_video and final_cues:
             self.update(job, stage="压制硬字幕视频", progress=0.94)
             hard_video_out = output_dir / f"{stem}_中文字幕硬字幕.mp4"
-            mux_hard_subtitles(media, final_files["cn_srt"], hard_video_out)
+            mux_hard_subtitles(
+                media,
+                final_files["cn_srt"],
+                hard_video_out,
+                run=lambda command, cwd=None: self.run_command(job, command, cwd=cwd),
+            )
             job.outputs["hard_video"] = str(hard_video_out)
         elif options.create_hard_subtitle_video:
             self.update(job, log="未检测到可靠对白，跳过硬字幕视频压制")

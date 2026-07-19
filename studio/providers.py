@@ -30,6 +30,17 @@ def normalize_openai_base_url(base_url: str) -> str:
     return base
 
 
+def _raise_provider_error(response: httpx.Response):
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = re.sub(r"\s+", " ", response.text).strip()[:1200]
+        suffix = f"；服务响应：{detail}" if detail else ""
+        raise RuntimeError(
+            f"远程服务返回 HTTP {response.status_code}（{response.request.url}）{suffix}"
+        ) from exc
+
+
 class OpenAICompatibleProvider:
     def __init__(self, base_url: str, api_key: str = "", timeout: float = 300):
         self.base_url = normalize_openai_base_url(base_url)
@@ -38,7 +49,7 @@ class OpenAICompatibleProvider:
 
     def list_models(self) -> list[str]:
         response = self.client.get(f"{self.base_url}/models")
-        response.raise_for_status()
+        _raise_provider_error(response)
         data = response.json().get("data", [])
         return sorted({str(item["id"]) for item in data if item.get("id")})
 
@@ -56,13 +67,18 @@ class OpenAICompatibleProvider:
         if response.status_code >= 400:
             payload.pop("response_format", None)
             response = self.client.post(f"{self.base_url}/chat/completions", json=payload)
-        response.raise_for_status()
+        _raise_provider_error(response)
         content = response.json()["choices"][0]["message"]["content"]
         if isinstance(content, list):
             content = "".join(str(x.get("text", "")) for x in content if isinstance(x, dict))
         return _json_from_text(str(content))
 
     def transcribe(self, model: str, wav_path: Path, language: str = "ja") -> dict[str, Any]:
+        if model.startswith("gpt-4o") and "transcribe" in model:
+            raise ValueError(
+                "gpt-4o-transcribe 官方接口只返回 json，不支持本软件恢复时间轴所需的 "
+                "verbose_json.segments；请改用 whisper-1 或其他明确支持分段时间戳的兼容模型"
+            )
         data = {
             "model": model,
             "language": language,
@@ -75,7 +91,7 @@ class OpenAICompatibleProvider:
                 data=data,
                 files={"file": (wav_path.name, file, "audio/wav")},
             )
-        response.raise_for_status()
+        _raise_provider_error(response)
         return response.json()
 
 
@@ -86,7 +102,7 @@ class OllamaProvider:
 
     def list_models(self) -> list[str]:
         response = self.client.get(f"{self.base_url}/api/tags")
-        response.raise_for_status()
+        _raise_provider_error(response)
         return sorted({str(item["name"]) for item in response.json().get("models", [])})
 
     def chat_json(self, model: str, system: str, user: dict[str, Any]) -> dict[str, Any]:
@@ -101,7 +117,7 @@ class OllamaProvider:
             ],
         }
         response = self.client.post(f"{self.base_url}/api/chat", json=payload)
-        response.raise_for_status()
+        _raise_provider_error(response)
         return _json_from_text(response.json()["message"]["content"])
 
 

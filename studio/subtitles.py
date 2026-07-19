@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .languages import language_info, source_text
 
@@ -53,7 +53,13 @@ def write_subtitles(
     return {"cn_srt": cn, "bilingual_srt": bi, "source_srt": source_srt, "json": data}
 
 
-def mux_soft_subtitles(media: Path, subtitle: Path, output: Path, title: str = "简体中文"):
+def mux_soft_subtitles(
+    media: Path,
+    subtitle: Path,
+    output: Path,
+    title: str = "简体中文",
+    run: Callable[[list[str], Path | None], None] | None = None,
+):
     command = [
         "ffmpeg", "-hide_banner", "-y", "-i", str(media), "-i", str(subtitle),
         "-map", "0:v", "-map", "0:a?", "-map", "1:0",
@@ -61,11 +67,19 @@ def mux_soft_subtitles(media: Path, subtitle: Path, output: Path, title: str = "
         "-metadata:s:s:0", "language=zho", "-metadata:s:s:0", f"title={title}",
         "-disposition:s:0", "default", "-movflags", "+faststart", str(output),
     ]
-    subprocess.run(command, check=True)
+    if run:
+        run(command, None)
+    else:
+        subprocess.run(command, check=True)
     return output
 
 
-def mux_hard_subtitles(media: Path, subtitle: Path, output: Path):
+def mux_hard_subtitles(
+    media: Path,
+    subtitle: Path,
+    output: Path,
+    run: Callable[[list[str], Path | None], None] | None = None,
+):
     """Burn Chinese subtitles into the video with a stable ASCII filter path."""
     temporary_name = ""
     try:
@@ -86,7 +100,10 @@ def mux_hard_subtitles(media: Path, subtitle: Path, output: Path):
             "-c:v", "libx264", "-preset", "medium", "-crf", "18",
             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output),
         ]
-        subprocess.run(command, cwd=output.parent, check=True)
+        if run:
+            run(command, output.parent)
+        else:
+            subprocess.run(command, cwd=output.parent, check=True)
         return output
     finally:
         if temporary_name:
