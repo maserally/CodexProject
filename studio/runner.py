@@ -153,6 +153,23 @@ class JobManager:
         threading.Thread(target=self._run_guarded, args=(job,), daemon=True).start()
         return job
 
+    def start_staged(self, job_id: str, cloud_worker_settings: CloudWorkerSettings):
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job.status != "staged":
+                raise RuntimeError("只有已经校验并预上传完成的任务可以开始云端处理")
+            job.cloud_worker_settings = cloud_worker_settings
+            job.options.cloud_stage_only = False
+            job.status = "queued"
+            job.stage = "已校验音轨，等待 GPU 处理"
+            job.error = ""
+            self.controls[job.id] = JobControl()
+        self.update(job, progress=max(job.progress, 0.20), log="开始使用已校验的云端音轨")
+        threading.Thread(target=self._run_guarded, args=(job,), daemon=True).start()
+        return job
+
     def get(self, job_id: str):
         return self.jobs.get(job_id)
 
@@ -366,7 +383,7 @@ class JobManager:
                     job.cloud_session = None
             cloud_audio = (JOBS_DIR / job.id / "work" / "cloud_audio.flac").resolve()
             expected_workdir = (JOBS_DIR / job.id / "work").resolve()
-            if cloud_audio.parent == expected_workdir:
+            if cloud_audio.parent == expected_workdir and job.status != "staged":
                 cloud_audio.unlink(missing_ok=True)
             if acquired:
                 GPU_LOCK.release()
@@ -459,13 +476,40 @@ class JobManager:
                 log="原视频保留在本机，仅向云节点上传单声道 FLAC 音轨",
             )
             analysis_media = workdir / "cloud_audio.flac"
-            self.run_command(
-                job,
-                [
-                    "ffmpeg", "-y", "-i", str(media), "-vn", "-ac", "1", "-ar", "16000",
-                    "-c:a", "flac", "-compression_level", "8", str(analysis_media),
-                ],
+            if analysis_media.exists() and analysis_media.stat().st_size:
+                self.update(job, log="复用预上传阶段生成的本地 16 kHz 单声道 FLAC 音轨")
+            else:
+                self.run_command(
+                    job,
+                    [
+                        "ffmpeg", "-y", "-i", str(media), "-vn", "-ac", "1", "-ar", "16000",
+                        "-c:a", "flac", "-compression_level", "8", str(analysis_media),
+                    ],
+                )
+        if options.cloud_stage_only:
+            if not use_cloud_worker:
+                raise RuntimeError("无卡预上传必须先启用云 GPU 运算单元和本地 Whisper")
+            self.update(job, stage="连接无卡模式并校验上传", progress=0.08)
+            worker = CloudWhisperWorker(
+                worker_settings,
+                logger=lambda message: self.update(job, log=message[-600:]),
+                checkpoint=lambda: self.checkpoint(job),
             )
+            job.cloud_session = worker
+            result = worker.stage_job_audio(job.id, analysis_media)
+            worker.close()
+            job.cloud_session = None
+            self.update(
+                job,
+                status="staged",
+                stage="音轨已校验，等待 GPU 开机",
+                progress=0.20,
+                log=(
+                    f"预上传完成：{int(result['size']) / 1024 / 1024:.1f} MB，"
+                    f"SHA-256 {str(result['sha256'])[:12]}…；正式处理前会再次校验"
+                ),
+            )
+            return
         self.update(job, status="running", stage="声音活动检测", progress=0.03, log=f"视频时长 {duration:.2f} 秒")
 
         vad_path = workdir / "vad_segments.json"

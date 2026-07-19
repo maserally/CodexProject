@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from studio.cloud_worker import CloudWhisperWorker, CloudWorkerError, _validated
 from studio.main import app
@@ -12,6 +12,54 @@ from studio.settings_store import load_provider_settings, save_provider_settings
 
 
 class CloudWorkerTests(unittest.TestCase):
+    def test_verified_audio_upload_uses_size_and_sha256_then_reuses_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            audio = Path(folder) / "audio.flac"
+            audio.write_bytes(b"verified-audio" * 1024)
+            worker = object.__new__(CloudWhisperWorker)
+            worker.remote_job_dir = "/root/subtitle-worker/jobs/test"
+            worker.checkpoint = lambda: None
+            worker.logger = MagicMock()
+            size, digest = worker._local_file_info(audio)
+            worker._remote_file_info = MagicMock(side_effect=[None, (size, digest)])
+            worker._upload = MagicMock()
+            worker._exec = MagicMock(return_value="")
+
+            result = worker._ensure_verified_audio(audio)
+
+            self.assertEqual(result["size"], size)
+            self.assertEqual(result["sha256"], digest)
+            self.assertFalse(result["reused"])
+            worker._upload.assert_called_once()
+            publish_command = worker._exec.call_args_list[-1].args[0]
+            self.assertIn("audio.flac.uploading", publish_command)
+            self.assertIn("audio.ready.json", publish_command)
+
+            worker._remote_file_info = MagicMock(return_value=(size, digest))
+            worker._upload.reset_mock()
+            reused = worker._ensure_verified_audio(audio)
+            self.assertTrue(reused["reused"])
+            worker._upload.assert_not_called()
+
+    def test_corrupt_audio_upload_retries_three_times_and_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            audio = Path(folder) / "audio.flac"
+            audio.write_bytes(b"local-audio")
+            worker = object.__new__(CloudWhisperWorker)
+            worker.remote_job_dir = "/root/subtitle-worker/jobs/test"
+            worker.checkpoint = lambda: None
+            worker.logger = MagicMock()
+            worker._remote_file_info = MagicMock(
+                side_effect=[None, (1, "0" * 64), (1, "1" * 64), (1, "2" * 64)]
+            )
+            worker._upload = MagicMock()
+            worker._exec = MagicMock(return_value="")
+
+            with self.assertRaises(CloudWorkerError):
+                worker._ensure_verified_audio(audio)
+
+            self.assertEqual(worker._upload.call_count, 3)
+
     def test_controllable_remote_command_waits_for_setsid_child(self):
         class FakeChannel:
             command = ""

@@ -10,7 +10,7 @@ from studio.main import _bulk_job_action, app
 from studio.providers import supports_segment_timestamps
 from studio.remote_asr import _remote_packs
 from studio.runner import JobControl, JobManager, JobState
-from studio.schemas import JobOptions, ProviderSettings
+from studio.schemas import CloudWorkerSettings, JobOptions, ProviderSettings
 from studio.settings_store import (
     load_provider_settings,
     resolve_provider_api_keys,
@@ -19,6 +19,37 @@ from studio.settings_store import (
 
 
 class TaskManagementTests(unittest.TestCase):
+    def test_staged_job_can_be_started_with_fresh_cloud_credentials(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with patch("studio.runner.JOBS_DIR", root / "jobs"), patch(
+                "studio.runner.UPLOADS_DIR", root / "uploads"
+            ):
+                manager = JobManager()
+                job = JobState(
+                    id="staged-job",
+                    options=JobOptions(input_path="movie.mp4", cloud_stage_only=True),
+                    status="staged",
+                    stage="音轨已校验，等待 GPU 开机",
+                    progress=0.2,
+                )
+                manager.jobs[job.id] = job
+                finished = threading.Event()
+                with patch.object(manager, "_run_guarded", side_effect=lambda _job: finished.set()):
+                    started = manager.start_staged(
+                        job.id,
+                        CloudWorkerSettings(
+                            enabled=True,
+                            host="gpu.example.com",
+                            password="secret",
+                        ),
+                    )
+                    self.assertTrue(finished.wait(2))
+
+                self.assertEqual(started.status, "queued")
+                self.assertFalse(started.options.cloud_stage_only)
+                self.assertEqual(started.cloud_worker_settings.host, "gpu.example.com")
+
     def test_pause_and_resume_a_real_child_process(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -106,6 +137,8 @@ class TaskManagementTests(unittest.TestCase):
         self.assertIn("/api/jobs/actions/pause-all", paths)
         self.assertIn("/api/jobs/actions/cancel-all", paths)
         self.assertIn("/api/jobs/actions/delete-finished", paths)
+        self.assertIn("/api/jobs/actions/start-staged-all", paths)
+        self.assertIn("/api/jobs/{job_id}/start-staged", paths)
 
     def test_bulk_actions_only_target_eligible_job_states(self):
         class FakeManager:
@@ -125,6 +158,9 @@ class TaskManagementTests(unittest.TestCase):
 
             def delete(self, job_id):
                 self.deleted.append(job_id)
+
+            def get(self, job_id):
+                return None
 
         fake = FakeManager()
         with patch("studio.main.manager", fake):

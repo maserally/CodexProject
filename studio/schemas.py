@@ -51,6 +51,7 @@ class JobOptions(BaseModel):
     publish_mode: bool = True
     create_soft_subtitle_video: bool = True
     create_hard_subtitle_video: bool = False
+    cloud_stage_only: bool = False
 
     @field_validator("input_path", "output_dir", mode="before")
     @classmethod

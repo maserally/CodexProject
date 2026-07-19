@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import posixpath
 import re
 import shlex
@@ -241,6 +243,65 @@ touch {remote}/.worker-ready-v2
 
         self.sftp.put(str(local_path), remote_path, callback=callback, confirm=True)
 
+    def _local_file_info(self, local_path: Path) -> tuple[int, str]:
+        size = local_path.stat().st_size
+        digest = hashlib.sha256()
+        with local_path.open("rb") as stream:
+            while chunk := stream.read(8 * 1024 * 1024):
+                self.checkpoint()
+                digest.update(chunk)
+        return size, digest.hexdigest()
+
+    def _remote_file_info(self, remote_path: str) -> tuple[int, str] | None:
+        quoted = shlex.quote(remote_path)
+        output = self._exec(
+            f"if [ -f {quoted} ]; then stat -c %s {quoted}; sha256sum {quoted} | cut -d' ' -f1; fi",
+            timeout=900,
+        )
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines:
+            return None
+        if len(lines) != 2 or not lines[0].isdigit() or not re.fullmatch(r"[0-9a-f]{64}", lines[1]):
+            raise CloudWorkerError("云端文件校验结果格式异常")
+        return int(lines[0]), lines[1]
+
+    def _ensure_verified_audio(self, audio_path: Path) -> dict[str, object]:
+        if not self.remote_job_dir:
+            raise CloudWorkerError("尚未设置云端任务目录")
+        remote_audio = posixpath.join(self.remote_job_dir, "audio.flac")
+        remote_part = posixpath.join(self.remote_job_dir, "audio.flac.uploading")
+        remote_manifest = posixpath.join(self.remote_job_dir, "audio.ready.json")
+        local_size, local_sha256 = self._local_file_info(audio_path)
+        expected = (local_size, local_sha256)
+        if self._remote_file_info(remote_audio) == expected:
+            self.logger(f"复用已校验云端音轨 · {local_size / 1024 / 1024:.1f} MB · SHA-256 {local_sha256[:12]}…")
+            return {"size": local_size, "sha256": local_sha256, "reused": True}
+
+        for attempt in range(1, 4):
+            self.checkpoint()
+            self._exec("rm -f -- " + shlex.quote(remote_part), timeout=30)
+            self._upload(audio_path, remote_part, f"上传音轨（第 {attempt}/3 次）")
+            remote_info = self._remote_file_info(remote_part)
+            if remote_info == expected:
+                manifest = json.dumps(
+                    {"version": 1, "size": local_size, "sha256": local_sha256},
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                manifest_part = remote_manifest + ".uploading"
+                command = (
+                    f"mv -f -- {shlex.quote(remote_part)} {shlex.quote(remote_audio)}; "
+                    f"printf '%s\\n' {shlex.quote(manifest)} > {shlex.quote(manifest_part)}; "
+                    f"mv -f -- {shlex.quote(manifest_part)} {shlex.quote(remote_manifest)}"
+                )
+                self._exec(command, timeout=30)
+                self.logger(f"音轨校验通过 · {local_size / 1024 / 1024:.1f} MB · SHA-256 {local_sha256[:12]}…")
+                return {"size": local_size, "sha256": local_sha256, "reused": False}
+            self.logger(f"音轨校验失败，第 {attempt}/3 次传输不完整，准备重传")
+
+        self._exec("rm -f -- " + shlex.quote(remote_part), timeout=30)
+        raise CloudWorkerError("音轨连续 3 次未通过文件大小与 SHA-256 校验，已拒绝进入识别阶段")
+
     def _download(self, remote_path: str, local_path: Path):
         if not self.sftp:
             raise CloudWorkerError("云节点文件通道尚未连接")
@@ -253,13 +314,20 @@ touch {remote}/.worker-ready-v2
                 "远程运算可能提前退出，请查看该任务在此错误之前的云端日志"
             ) from exc
 
+    def stage_job_audio(self, job_id: str, audio_path: Path) -> dict[str, object]:
+        if not self.client:
+            self.connect()
+        self.remote_job_dir = posixpath.join(self.settings.remote_dir, "jobs", job_id)
+        self._mkdir(self.remote_job_dir)
+        return self._ensure_verified_audio(audio_path)
+
     def prepare_job(self, job_id: str, audio_path: Path):
         if not self.client:
             self.connect()
+        self.remote_job_dir = posixpath.join(self.settings.remote_dir, "jobs", job_id)
         if self.settings.auto_setup:
             self.logger("检查并安装云节点运算依赖")
             self.bootstrap()
-        self.remote_job_dir = posixpath.join(self.settings.remote_dir, "jobs", job_id)
         self._mkdir(posixpath.join(self.remote_job_dir, "studio"))
         for local, remote in (
             (ROOT / "asr_stage.py", posixpath.join(self.remote_job_dir, "asr_stage.py")),
@@ -269,7 +337,7 @@ touch {remote}/.worker-ready-v2
             (ROOT / "studio" / "languages.py", posixpath.join(self.remote_job_dir, "studio", "languages.py")),
         ):
             self._upload(local, remote, f"同步 {local.name}")
-        self._upload(audio_path, posixpath.join(self.remote_job_dir, "audio.flac"), "上传音轨")
+        self._ensure_verified_audio(audio_path)
 
     def run_event_gate(self, vad_path: Path, local_events_path: Path):
         remote_work = posixpath.join(self.remote_job_dir, "event_gate")

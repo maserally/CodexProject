@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -51,7 +52,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.12.0")
+app = FastAPI(title="字幕翻译工作室", version="1.13.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -201,6 +202,13 @@ def create_job(options: JobOptions):
         options.output_dir = str(output_dir)
     saved = load_provider_settings(expose_secrets=True)
     worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    if options.cloud_stage_only and (
+        not worker.enabled or options.asr.kind != "local_whisper"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="无卡预上传必须启用云 GPU 运算单元，并选择本地 Whisper 识别",
+        )
     return manager.create(options, worker if worker.enabled else None).public()
 
 
@@ -322,6 +330,13 @@ def create_folder_jobs(request: FolderBatchRequest):
     saved = load_provider_settings(expose_secrets=True)
     worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
     base_options = resolve_provider_api_keys(request.options)
+    if base_options.cloud_stage_only and (
+        not worker.enabled or base_options.asr.kind != "local_whisper"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="无卡预上传必须启用云 GPU 运算单元，并选择本地 Whisper 识别",
+        )
     created = []
     used_output_names: dict[str, set[str]] = {}
     for media_path in files:
@@ -372,6 +387,22 @@ def list_jobs():
     return {"jobs": manager.list()}
 
 
+def _cleanup_preuploaded_audio(job):
+    if not job or not (job.status == "staged" or job.options.cloud_stage_only):
+        return
+    saved = load_provider_settings(expose_secrets=True)
+    worker_settings = job.cloud_worker_settings or CloudWorkerSettings.model_validate(
+        saved.get("cloud_worker", {})
+    )
+    worker = CloudWhisperWorker(worker_settings)
+    try:
+        worker.connect()
+        worker.remote_job_dir = posixpath.join(worker.settings.remote_dir, "jobs", job.id)
+        worker.cleanup_job()
+    finally:
+        worker.close()
+
+
 def _bulk_job_action(action: str, eligible_statuses: set[str]):
     jobs = manager.list()
     targets = [job["id"] for job in jobs if job["status"] in eligible_statuses]
@@ -380,11 +411,12 @@ def _bulk_job_action(action: str, eligible_statuses: set[str]):
     for job_id in targets:
         try:
             if action == "delete":
+                _cleanup_preuploaded_audio(manager.get(job_id))
                 manager.delete(job_id)
             else:
                 getattr(manager, action)(job_id)
             succeeded.append(job_id)
-        except (KeyError, RuntimeError, OSError) as exc:
+        except Exception as exc:
             failed.append({"id": job_id, "error": str(exc)})
     return {
         "ok": not failed,
@@ -405,6 +437,30 @@ def cancel_all_jobs():
     return _bulk_job_action("cancel", {"queued", "running", "paused"})
 
 
+@app.post("/api/jobs/actions/start-staged-all")
+def start_all_staged_jobs():
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    if not worker.enabled:
+        raise HTTPException(status_code=400, detail="请先启用并保存云 GPU 运算单元配置")
+    targets = [job["id"] for job in manager.list() if job["status"] == "staged"]
+    succeeded = []
+    failed = []
+    for job_id in targets:
+        try:
+            manager.start_staged(job_id, worker)
+            succeeded.append(job_id)
+        except (KeyError, RuntimeError) as exc:
+            failed.append({"id": job_id, "error": str(exc)})
+    return {
+        "ok": not failed,
+        "action": "start-staged-all",
+        "count": len(succeeded),
+        "succeeded": succeeded,
+        "failed": failed,
+    }
+
+
 @app.delete("/api/jobs/actions/delete-finished")
 def delete_finished_jobs():
     return _bulk_job_action("delete", {"completed", "failed", "canceled"})
@@ -418,15 +474,36 @@ def get_job(job_id: str):
     return job.public()
 
 
+@app.post("/api/jobs/{job_id}/start-staged")
+def start_staged_job(job_id: str):
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    if not worker.enabled:
+        raise HTTPException(status_code=400, detail="请先启用并保存云 GPU 运算单元配置")
+    try:
+        return manager.start_staged(job_id, worker).public()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str):
     try:
+        job = manager.get(job_id)
+        _cleanup_preuploaded_audio(job)
         deleted = manager.delete(job_id)
         return {"ok": True, "deleted": str(deleted)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务不存在") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"无法清理云端预上传音轨，任务尚未删除：{exc}",
+        ) from exc
 
 
 def _job_action(job_id: str, action: str):
