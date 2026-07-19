@@ -83,7 +83,7 @@ def accepted_recovery_rows(
 ):
     accepted = []
     for row in recovery_final:
-        if row.get("source") == "medium_fallback":
+        if row.get("review_source") == "medium_fallback":
             continue
         similarities = [
             item["similarity"]
@@ -92,7 +92,7 @@ def accepted_recovery_rows(
         ]
         if similarities and max(similarities) >= consensus_threshold:
             item = dict(row)
-            item["source"] = "gap_recovery_consensus"
+            item["recovery_source"] = "gap_recovery_consensus"
             accepted.append(item)
     return accepted
 

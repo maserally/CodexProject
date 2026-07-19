@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from studio.quality import finalize_cues, quality_summary
-from studio.recall import vad_fallback_events_for_gaps
+from studio.recall import accepted_recovery_rows, vad_fallback_events_for_gaps
 from studio.schemas import ProviderSettings
 from studio.translation import audit_translation, safe_high_risk, translate_cues
 
@@ -73,6 +73,28 @@ class QualityOptimizationTests(unittest.TestCase):
         )
         self.assertEqual([(x["start"], x["end"]) for x in rows], [(10.0, 11.0), (13.0, 14.0)])
         self.assertTrue(all(x["source"] == "vad_gap_fallback" for x in rows))
+
+    def test_recovery_provenance_does_not_replace_recognized_text(self):
+        rows = accepted_recovery_rows(
+            [{"start": 1.0, "end": 2.0, "source": "待って"}],
+            [{"start": 1.0, "end": 2.0, "similarity": 0.9}],
+            0.5,
+        )
+        self.assertEqual(rows[0]["source"], "待って")
+        self.assertEqual(rows[0]["recovery_source"], "gap_recovery_consensus")
+        rejected = accepted_recovery_rows(
+            [
+                {
+                    "start": 1.0,
+                    "end": 2.0,
+                    "source": "待って",
+                    "review_source": "medium_fallback",
+                }
+            ],
+            [{"start": 1.0, "end": 2.0, "similarity": 0.9}],
+            0.5,
+        )
+        self.assertEqual(rejected, [])
 
     def test_japanese_action_direction_is_audited_and_has_safe_fallback(self):
         self.assertTrue(audit_translation("あ、抜けちゃった", "啊，搞砸了", "ja"))

@@ -147,7 +147,7 @@ def main():
             for other in accepted_large
         )
         if not overlap and row["mean_word_probability"] >= 0.78:
-            filled.append({**row, "source": "medium_fallback"})
+            filled.append({**row, "review_source": "medium_fallback"})
     filled.sort(key=lambda x: (x["start"], x["end"]))
 
     comparisons = []
