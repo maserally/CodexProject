@@ -674,9 +674,16 @@ class JobManager:
             if not use_cloud_worker:
                 raise RuntimeError("无卡预上传必须先启用云 GPU 运算单元和本地 Whisper")
             self.update(job, stage="连接无卡模式并校验上传", progress=0.08)
+            def stage_upload_log(message):
+                matched = re.search(r"上传音轨.*?(\d+)%", message)
+                progress = None
+                if matched:
+                    progress = 0.08 + 0.12 * int(matched.group(1)) / 100
+                self.update(job, progress=progress, log=message[-600:])
+
             worker = CloudWhisperWorker(
                 worker_settings,
-                logger=lambda message: self.update(job, log=message[-600:]),
+                logger=stage_upload_log,
                 checkpoint=lambda: self.checkpoint(job),
             )
             job.cloud_session = worker

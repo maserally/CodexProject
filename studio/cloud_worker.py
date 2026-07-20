@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import posixpath
 import re
 import shlex
+import threading
 import time
 from pathlib import Path
 from typing import Callable
 
 from .config import ROOT
 from .schemas import CloudWorkerSettings
+
+
+CLOUD_UPLOAD_CONCURRENCY = max(
+    1, min(6, int(os.getenv("SUBTITLE_CLOUD_UPLOAD_CONCURRENCY", "3")))
+)
+CLOUD_UPLOAD_SLOTS = threading.BoundedSemaphore(CLOUD_UPLOAD_CONCURRENCY)
 
 
 class CloudWorkerError(RuntimeError):
@@ -429,7 +437,7 @@ df -h {models}
                     target.write(chunk)
                     sent += len(chunk)
                     percent = int(sent * 100 / max(1, size))
-                    if percent >= last_percent + 10 or percent == 100:
+                    if percent >= last_percent + 5 or percent == 100:
                         last_percent = percent
                         self.logger(f"{label} {percent}%")
 
@@ -449,45 +457,52 @@ df -h {models}
         if self._remote_file_info(remote_audio) == expected:
             self.logger(f"复用已校验云端音轨 · {local_size / 1024 / 1024:.1f} MB · SHA-256 {local_sha256[:12]}…")
             return {"size": local_size, "sha256": local_sha256, "reused": True}
-
-        for attempt in range(1, 4):
+        self.logger(f"等待上传通道 · 最多并行 {CLOUD_UPLOAD_CONCURRENCY} 个任务")
+        while not CLOUD_UPLOAD_SLOTS.acquire(timeout=0.25):
             self.checkpoint()
-            try:
-                self._upload_resumable(
-                    audio_path,
-                    remote_part,
-                    f"上传音轨（连接尝试 {attempt}/3）",
-                )
-                remote_info = self._remote_file_info(remote_part)
-            except (EOFError, OSError, _paramiko().SSHException) as exc:
-                if attempt == 3:
-                    raise CloudWorkerError(
-                        f"音轨上传连续 3 次连接中断：{type(exc).__name__}"
-                    ) from exc
-                self.logger(
-                    f"上传连接中断（{type(exc).__name__}），正在重连并从已校验分片继续"
-                )
-                self._reconnect()
-                continue
-            if remote_info == expected:
-                manifest = json.dumps(
-                    {"version": 1, "size": local_size, "sha256": local_sha256},
-                    ensure_ascii=True,
-                    separators=(",", ":"),
-                )
-                manifest_part = remote_manifest + ".uploading"
-                command = (
-                    f"mv -f -- {shlex.quote(remote_part)} {shlex.quote(remote_audio)}; "
-                    f"printf '%s\\n' {shlex.quote(manifest)} > {shlex.quote(manifest_part)}; "
-                    f"mv -f -- {shlex.quote(manifest_part)} {shlex.quote(remote_manifest)}"
-                )
-                self._exec(command, timeout=30)
-                self.logger(f"音轨校验通过 · {local_size / 1024 / 1024:.1f} MB · SHA-256 {local_sha256[:12]}…")
-                return {"size": local_size, "sha256": local_sha256, "reused": False}
-            self.logger(f"音轨校验失败，第 {attempt}/3 次传输不完整，准备校验分片并续传")
+        self.logger("已取得上传通道")
+        try:
+            for attempt in range(1, 4):
+                self.checkpoint()
+                try:
+                    self._upload_resumable(
+                        audio_path,
+                        remote_part,
+                        f"上传音轨（连接尝试 {attempt}/3）",
+                    )
+                    remote_info = self._remote_file_info(remote_part)
+                except (EOFError, OSError, _paramiko().SSHException) as exc:
+                    if attempt == 3:
+                        raise CloudWorkerError(
+                            f"音轨上传连续 3 次连接中断：{type(exc).__name__}"
+                        ) from exc
+                    self.logger(
+                        f"上传连接中断（{type(exc).__name__}），正在重连并从已校验分片继续"
+                    )
+                    self._reconnect()
+                    continue
+                if remote_info == expected:
+                    manifest = json.dumps(
+                        {"version": 1, "size": local_size, "sha256": local_sha256},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    )
+                    manifest_part = remote_manifest + ".uploading"
+                    command = (
+                        f"mv -f -- {shlex.quote(remote_part)} {shlex.quote(remote_audio)}; "
+                        f"printf '%s\\n' {shlex.quote(manifest)} > {shlex.quote(manifest_part)}; "
+                        f"mv -f -- {shlex.quote(manifest_part)} {shlex.quote(remote_manifest)}"
+                    )
+                    self._exec(command, timeout=30)
+                    self.logger(f"音轨校验通过 · {local_size / 1024 / 1024:.1f} MB · SHA-256 {local_sha256[:12]}…")
+                    return {"size": local_size, "sha256": local_sha256, "reused": False}
+                self.logger(f"音轨校验失败，第 {attempt}/3 次传输不完整，准备校验分片并续传")
 
-        self._exec("rm -f -- " + shlex.quote(remote_part), timeout=30)
-        raise CloudWorkerError("音轨连续 3 次未通过文件大小与 SHA-256 校验，已拒绝进入识别阶段")
+            self._exec("rm -f -- " + shlex.quote(remote_part), timeout=30)
+            raise CloudWorkerError("音轨连续 3 次未通过文件大小与 SHA-256 校验，已拒绝进入识别阶段")
+        finally:
+            CLOUD_UPLOAD_SLOTS.release()
+            self.logger("已释放上传通道")
 
     def _download(self, remote_path: str, local_path: Path):
         if not self.sftp:
