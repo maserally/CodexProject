@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.17.1">
+  <link rel="stylesheet" href="/static/style.css?v=1.18.0">
 </head>
 <body>
   <main class="shell">
@@ -95,6 +95,7 @@
         <label>识别模型<div class="model-row"><select id="asr-model"></select><button type="button" id="refresh-asr">刷新模型</button></div><input id="asr-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="asr-model-help" class="field-help">medium：默认主识别模型，速度与准确率较均衡</small></label>
         <div id="installed-whisper" class="model-status">正在读取本机模型…</div>
         <label>本地复核模型<select id="verifier-model"></select><small id="verifier-model-help" class="field-help">只复核初筛后的对白；large-v3 更准确但更占显存，不会全片重复识别</small></label>
+        <div class="inline-config-save"><div><b>本机配置</b><small>保存本机 ASR、识别与复核模型</small></div><button id="save-local-settings" type="button">保存本机配置</button><span id="local-save-status"></span></div>
       </div>
 
       <div id="cloud-worker-panel" class="panel mode-zone cloud-zone inactive-zone">
@@ -108,7 +109,7 @@
             <div><strong>③ large-v3</strong><small>仅裁决弱声、噪声和文本冲突</small></div>
             <div><strong>④ Qwen ForcedAligner</strong><small>最终恢复精确时间轴</small></div>
           </div>
-          <small class="field-help">真立体声冲突会额外比较中置、左、右声道；模型架构由程序自动判决，无需手动选择。</small>
+          <small class="field-help">真立体声冲突会额外比较中置、左、右声道。针对单张 32GB GPU：跨任务识别并发固定为 1；单任务内 Qwen 与 Cohere 以安全批量 2 并行，large-v3 和对齐模型随后运行，避免显存争抢。</small>
         </div>
         <div id="cloud-worker-fields" class="cloud-worker-grid disabled-panel">
           <label>服务器地址<input id="cloud-worker-host" placeholder="例如 AutoDL 实例 SSH 地址"></label>
@@ -123,6 +124,7 @@
         <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次连接自动安装全部依赖并从国内源下载模型</label>
         <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">安装基础环境</button><button id="bootstrap-accuracy-worker" type="button">安装并校验全部模型</button><button id="stage-cloud" type="button">无卡模式：预上传所选音轨</button></div>
         <div id="cloud-worker-status" class="model-status">选择“云算力最高精度”后可连接服务器</div>
+        <div class="inline-config-save"><div><b>云算力配置</b><small>保存运行模式、SSH、程序目录与数据盘目录</small></div><button id="save-cloud-settings" type="button">保存云算力配置</button><span id="cloud-save-status"></span></div>
       </div>
     </section>
 
@@ -155,15 +157,7 @@
         <label>校正模型<div class="model-row"><select id="text-reviewer-model"></select><button type="button" id="refresh-text-reviewer">刷新模型</button></div><input id="text-reviewer-model-custom" class="hidden model-custom" placeholder="手动输入模型 ID"><small id="text-reviewer-model-help" class="field-help">按批次读取前后文，只修改文字，不修改字幕 ID、条数和时间轴</small></label>
       </div>
       </div>
-    </section>
-
-    <section class="panel settings-storage">
-      <div class="storage-heading"><h2 id="provider-storage-title">6. 分区保存配置</h2><p id="provider-storage-help" class="muted">三类配置独立显示和保存；均写入本机配置目录，密码与 API Key 使用 Windows DPAPI 加密。</p></div>
-      <div class="storage-grid">
-        <div><b>本机专用配置</b><small>本机 ASR、识别模型和复核模型</small><button id="save-local-settings" type="button">保存本机配置</button><span id="local-save-status"></span></div>
-        <div><b>云算力专用配置</b><small>运行方式、SSH、云端目录和自动安装</small><button id="save-cloud-settings" type="button">保存云算力配置</button><span id="cloud-save-status"></span></div>
-        <div><b>云／本地通用配置</b><small>翻译模型、API 与最终文本校正模型</small><button id="save-common-settings" type="button">保存通用配置</button><span id="common-save-status"></span></div>
-      </div>
+      <div class="inline-config-save common-save"><div><b>通用配置</b><small>保存翻译、API 与最终文本校正模型</small></div><button id="save-common-settings" type="button">保存通用配置</button><span id="common-save-status"></span></div>
     </section>
 
     <section class="panel launch">
@@ -178,6 +172,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.17.1"></script>
+  <script src="/static/app.js?v=1.18.0"></script>
 </body>
 </html>

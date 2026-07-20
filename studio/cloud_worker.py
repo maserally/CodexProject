@@ -593,13 +593,13 @@ df -h {models}
             "--events", remote_events, "--windows", windows, "--output", primary,
             "--model", posixpath.join(models, "weights", "Qwen3-ASR-1.7B"),
             "--language", language, "--speech-threshold", str(speech_threshold),
-            "--nonlexical-factor", str(nonlexical_factor), "--batch-size", "3",
+            "--nonlexical-factor", str(nonlexical_factor), "--batch-size", "2",
         ])
         cohere_command = command([
             cohere_python, posixpath.join(scripts, "cohere_review_stage.py"), enhanced_audio,
             "--input", windows, "--output", cohere,
             "--model", posixpath.join(models, "weights", "cohere-transcribe-03-2026"),
-            "--language", language, "--batch-size", "3", "--review-all",
+            "--language", language, "--batch-size", "2", "--review-all",
         ])
         self.logger("最高精度识别阶段 2/5：Qwen 原始音频与 Cohere 增强音频并行识别")
         parallel = (

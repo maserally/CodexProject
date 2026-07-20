@@ -39,8 +39,8 @@ from .schemas import (
     FolderBatchRequest,
     FolderPickerRequest,
     FolderScanRequest,
+    JobEditableSettings,
     JobOptions,
-    JobOutputSettings,
     ModelListRequest,
     SavedProviderSettings,
 )
@@ -52,7 +52,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.17.1")
+app = FastAPI(title="字幕翻译工作室", version="1.18.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -463,7 +463,7 @@ def pause_all_jobs():
 
 
 @app.post("/api/jobs/actions/resume-all")
-def resume_all_jobs(output_settings: JobOutputSettings):
+def resume_all_jobs():
     saved = load_provider_settings(expose_secrets=True)
     worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
     targets = [job["id"] for job in manager.list() if job["status"] == "paused"]
@@ -473,11 +473,6 @@ def resume_all_jobs(output_settings: JobOutputSettings):
         try:
             job = manager.get(job_id)
             job.options = resolve_provider_api_keys(job.options)
-            manager.apply_output_settings(
-                job_id,
-                create_soft_subtitle_video=output_settings.create_soft_subtitle_video,
-                create_hard_subtitle_video=output_settings.create_hard_subtitle_video,
-            )
             if job_id in manager.controls:
                 manager.resume(job_id)
             else:
@@ -638,6 +633,18 @@ def pause_job(job_id: str):
 @app.post("/api/jobs/{job_id}/resume")
 def resume_job(job_id: str):
     return _job_action(job_id, "resume")
+
+
+@app.patch("/api/jobs/{job_id}/settings")
+def update_paused_job_settings(job_id: str, settings: JobEditableSettings):
+    try:
+        return manager.update_paused_settings(
+            job_id, **settings.model_dump(exclude_none=True)
+        ).public()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/jobs/{job_id}/cancel")

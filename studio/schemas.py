@@ -129,3 +129,11 @@ class CloudWorkerRequest(BaseModel):
 class JobOutputSettings(BaseModel):
     create_soft_subtitle_video: bool = False
     create_hard_subtitle_video: bool = False
+
+
+class JobEditableSettings(BaseModel):
+    profile: QualityProfile | None = None
+    remove_chinese_periods: bool | None = None
+    publish_mode: bool | None = None
+    create_soft_subtitle_video: bool | None = None
+    create_hard_subtitle_video: bool | None = None

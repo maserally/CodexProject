@@ -227,10 +227,45 @@ class TaskManagementTests(unittest.TestCase):
                 self.assertFalse(loaded.options.create_soft_subtitle_video)
                 self.assertFalse(loaded.options.create_hard_subtitle_video)
 
+    def test_paused_job_only_allows_unlocked_stage_settings_to_change(self):
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "studio.runner.JOBS_DIR", Path(folder) / "jobs"
+        ), patch("studio.runner.UPLOADS_DIR", Path(folder) / "uploads"):
+            manager = JobManager()
+            job = JobState(
+                id="stage-lock-job",
+                options=JobOptions(input_path="movie.mp4", profile="balanced"),
+                status="paused",
+                locked_config_groups=["recognition"],
+            )
+            manager.jobs[job.id] = job
+            manager.update_paused_settings(
+                job.id, create_soft_subtitle_video=False
+            )
+            self.assertFalse(job.options.create_soft_subtitle_video)
+            with self.assertRaisesRegex(RuntimeError, "识别策略阶段已经开始"):
+                manager.update_paused_settings(job.id, profile="recall")
+            job.locked_config_groups.append("output")
+            with self.assertRaisesRegex(RuntimeError, "字幕与视频产物阶段已经开始"):
+                manager.update_paused_settings(
+                    job.id, create_hard_subtitle_video=True
+                )
+
+    def test_public_job_exposes_stage_locks_without_secrets(self):
+        job = JobState(
+            id="public-lock-job",
+            options=JobOptions(input_path="movie.mp4"),
+            locked_config_groups=["recognition", "translation"],
+        )
+        public = job.public()
+        self.assertEqual(public["locked_config_groups"], ["recognition", "translation"])
+        self.assertEqual(public["config_group_labels"]["output"], "字幕与视频产物")
+
     def test_task_control_routes_are_registered(self):
         paths = {route.path for route in app.routes}
         self.assertIn("/api/jobs/{job_id}/pause", paths)
         self.assertIn("/api/jobs/{job_id}/resume", paths)
+        self.assertIn("/api/jobs/{job_id}/settings", paths)
         self.assertIn("/api/jobs/{job_id}/cancel", paths)
         self.assertIn("/api/jobs/actions/pause-all", paths)
         self.assertIn("/api/jobs/actions/resume-all", paths)

@@ -38,7 +38,14 @@ from .asr_context import attach_asr_reviews
 
 JOBS_DIR = DATA_DIR / "jobs"
 UPLOADS_DIR = DATA_DIR / "uploads"
-GPU_LOCK = threading.Lock()
+REMOTE_GPU_LOCK = threading.Lock()
+LOCAL_GPU_LOCK = threading.Lock()
+CONFIG_GROUP_LABELS = {
+    "recognition": "识别策略",
+    "translation": "翻译配置",
+    "text_review": "文本校正配置",
+    "output": "字幕与视频产物",
+}
 
 
 class JobCancelled(RuntimeError):
@@ -59,6 +66,8 @@ class JobControl:
     process: subprocess.Popen | None = None
     previous_status: str = "queued"
     previous_stage: str = "等待处理"
+    compute_lock: Any = None
+    compute_label: str = ""
 
 
 def _now():
@@ -77,6 +86,7 @@ class JobState:
     logs: list[str] = field(default_factory=list)
     outputs: dict[str, str] = field(default_factory=dict)
     error: str = ""
+    locked_config_groups: list[str] = field(default_factory=list)
     cloud_worker_settings: CloudWorkerSettings | None = field(default=None, repr=False)
     cloud_session: Any = field(default=None, repr=False)
 
@@ -95,6 +105,8 @@ class JobState:
             "logs": self.logs[-200:],
             "outputs": self.outputs,
             "error": self.error,
+            "locked_config_groups": list(self.locked_config_groups),
+            "config_group_labels": CONFIG_GROUP_LABELS,
             "options": safe_options,
         }
 
@@ -134,6 +146,7 @@ class JobManager:
                     logs=list(data.get("logs", [])),
                     outputs=dict(data.get("outputs", {})),
                     error=error,
+                    locked_config_groups=list(data.get("locked_config_groups", [])),
                 )
                 self.jobs[job.id] = job
             except Exception:
@@ -299,11 +312,41 @@ class JobManager:
         job = self.get(job_id)
         if not job:
             raise KeyError(job_id)
-        if job.status not in {"queued", "running", "paused", "staged"}:
-            raise RuntimeError("只有未完成的任务可以修改产物设置")
-        job.options.create_soft_subtitle_video = create_soft_subtitle_video
-        job.options.create_hard_subtitle_video = create_hard_subtitle_video
-        self.persist(job)
+        return self.update_paused_settings(
+            job_id,
+            create_soft_subtitle_video=create_soft_subtitle_video,
+            create_hard_subtitle_video=create_hard_subtitle_video,
+        )
+
+    def update_paused_settings(self, job_id: str, **changes):
+        job = self.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        if job.status != "paused":
+            raise RuntimeError("请先暂停任务，再修改尚未开始阶段的配置")
+        recognition_fields = {"profile"}
+        output_fields = {
+            "remove_chinese_periods", "publish_mode",
+            "create_soft_subtitle_video", "create_hard_subtitle_video",
+        }
+        pending = []
+        for name, value in changes.items():
+            if value is None or not hasattr(job.options, name):
+                continue
+            current = getattr(job.options, name)
+            if current == value:
+                continue
+            group = "recognition" if name in recognition_fields else (
+                "output" if name in output_fields else ""
+            )
+            if group and group in job.locked_config_groups:
+                raise RuntimeError(
+                    f"{CONFIG_GROUP_LABELS[group]}阶段已经开始，相关参数已锁定为只读"
+                )
+            pending.append((name, value))
+        for name, value in pending:
+            setattr(job.options, name, value)
+        self.update(job, log="已保存暂停任务中尚未锁定的配置")
         return job
 
     def recover_paused(
@@ -435,6 +478,38 @@ class JobManager:
         if control.cancel_event.is_set():
             raise JobCancelled("任务已取消")
 
+    def lock_config_group(self, job: JobState, group: str):
+        if group not in job.locked_config_groups:
+            job.locked_config_groups.append(group)
+            self.update(
+                job,
+                log=f"{CONFIG_GROUP_LABELS.get(group, group)}阶段已开始，相关配置锁定为只读",
+            )
+
+    def acquire_compute(self, job: JobState, lock, label: str):
+        control = self._control(job.id)
+        if control.compute_lock is lock:
+            return
+        if control.compute_lock is not None:
+            self.release_compute(job)
+        self.update(job, stage=f"等待{label}资源", log=f"等待独占{label}资源，避免并行任务抢占显存")
+        while not lock.acquire(timeout=0.25):
+            self.checkpoint(job)
+        control.compute_lock = lock
+        control.compute_label = label
+        self.update(job, log=f"已取得{label}资源")
+
+    def release_compute(self, job: JobState):
+        control = self.controls.get(job.id)
+        if not control or control.compute_lock is None:
+            return
+        lock = control.compute_lock
+        label = control.compute_label
+        control.compute_lock = None
+        control.compute_label = ""
+        lock.release()
+        self.update(job, log=f"已释放{label}资源，下一任务可以进入该阶段")
+
     def persist(self, job: JobState):
         folder = JOBS_DIR / job.id
         folder.mkdir(parents=True, exist_ok=True)
@@ -456,28 +531,21 @@ class JobManager:
 
     def _run_guarded(self, job: JobState):
         control = self._control(job.id)
-        acquired = False
         try:
-            while not acquired:
-                self.checkpoint(job)
-                acquired = GPU_LOCK.acquire(timeout=0.25)
-            try:
-                self.run_pipeline(job)
-            except JobCancelled:
-                if job.status != "canceled":
-                    self.update(job, status="canceled", stage="任务已取消", log="任务已取消")
-            except Exception as exc:
-                control = self.controls.get(job.id)
-                if control and control.cancel_event.is_set():
-                    if job.status != "canceled":
-                        self.update(job, status="canceled", stage="任务已取消", log="任务已取消")
-                else:
-                    job.error = str(exc)
-                    self.update(job, status="failed", stage="处理失败", log=traceback.format_exc())
+            self.run_pipeline(job)
         except JobCancelled:
             if job.status != "canceled":
                 self.update(job, status="canceled", stage="任务已取消", log="任务已取消")
+        except Exception as exc:
+            control = self.controls.get(job.id)
+            if control and control.cancel_event.is_set():
+                if job.status != "canceled":
+                    self.update(job, status="canceled", stage="任务已取消", log="任务已取消")
+            else:
+                job.error = str(exc)
+                self.update(job, status="failed", stage="处理失败", log=traceback.format_exc())
         finally:
+            self.release_compute(job)
             session = job.cloud_session
             if session:
                 try:
@@ -495,8 +563,6 @@ class JobManager:
             )
             if cloud_audio.parent == expected_workdir and not preserve_staged_audio:
                 cloud_audio.unlink(missing_ok=True)
-            if acquired:
-                GPU_LOCK.release()
             control.finished_event.set()
 
     def run_command(
@@ -568,7 +634,6 @@ class JobManager:
         output_dir.mkdir(parents=True, exist_ok=True)
         raw_stem = options.output_name.strip() or media.stem
         stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", raw_stem).strip(" .") or "subtitle_output"
-        profile = PROFILE_SETTINGS[options.profile]
         language = language_info(options.source_language)
         python = sys.executable
         duration = self.media_duration(media)
@@ -629,6 +694,13 @@ class JobManager:
                 ),
             )
             return
+        self.acquire_compute(
+            job,
+            REMOTE_GPU_LOCK if use_cloud_worker else LOCAL_GPU_LOCK,
+            "云GPU" if use_cloud_worker else "本机识别",
+        )
+        self.lock_config_group(job, "recognition")
+        profile = PROFILE_SETTINGS[options.profile]
         self.update(job, status="running", stage="声音活动检测", progress=0.03, log=f"视频时长 {duration:.2f} 秒")
 
         vad_path = workdir / "vad_segments.json"
@@ -981,6 +1053,10 @@ class JobManager:
         )
         recognition_tmp.replace(recognition_checkpoint)
 
+        self.release_compute(job)
+        if options.translator.kind == "local_ollama":
+            self.acquire_compute(job, LOCAL_GPU_LOCK, "本机翻译模型")
+        self.lock_config_group(job, "translation")
         self.update(job, stage="逐句翻译与否定词审计", progress=0.70)
         def translation_progress(current, total, _):
             self.checkpoint(job)
@@ -1020,6 +1096,8 @@ class JobManager:
             existing=existing_translation,
             checkpoint=save_translation_checkpoint,
         )
+        if options.translator.kind == "local_ollama" and options.text_reviewer.kind != "local_ollama":
+            self.release_compute(job)
         text_review_audit = {
             "enabled": False,
             "cue_count": len(translated),
@@ -1045,6 +1123,9 @@ class JobManager:
                     self.update(job, log=f"复用最终文本校正检查点 {len(translated)} 条")
             except (OSError, json.JSONDecodeError, TypeError):
                 reviewed_checkpoint = None
+        if options.text_reviewer.kind == "local_ollama":
+            self.acquire_compute(job, LOCAL_GPU_LOCK, "本机文本校正模型")
+        self.lock_config_group(job, "text_review")
         if reviewed_checkpoint:
             translated = reviewed_checkpoint["cues"]
             text_review_audit = reviewed_checkpoint.get("audit", text_review_audit)
@@ -1075,6 +1156,7 @@ class JobManager:
                 encoding="utf-8",
             )
             review_checkpoint_tmp.replace(text_review_checkpoint)
+        self.release_compute(job)
         if translated:
             text_review_audit_path = output_dir / f"{stem}_最终文本校正记录.json"
             text_review_audit_path.write_text(
@@ -1087,6 +1169,7 @@ class JobManager:
                     f"安全回退 {text_review_audit['rejected_count']} 条"
                 ),
             )
+        self.lock_config_group(job, "output")
         review_output_cues = finalize_cues(
             translated,
             min_duration=0.85,
