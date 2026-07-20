@@ -677,9 +677,16 @@ class JobManager:
             def stage_upload_log(message):
                 matched = re.search(r"上传音轨.*?(\d+)%", message)
                 progress = None
+                stage = None
                 if matched:
-                    progress = 0.08 + 0.12 * int(matched.group(1)) / 100
-                self.update(job, progress=progress, log=message[-600:])
+                    percent = int(matched.group(1))
+                    progress = 0.08 + 0.12 * percent / 100
+                    stage = f"上传音轨 {percent}%（3 路并行）"
+                elif message.startswith("等待上传通道"):
+                    stage = "等待上传通道（最多 3 路并行）"
+                elif message == "已取得上传通道":
+                    stage = "检查云端分片并断点续传"
+                self.update(job, stage=stage, progress=progress, log=message[-600:])
 
             worker = CloudWhisperWorker(
                 worker_settings,
