@@ -13,9 +13,6 @@ try:
 except ImportError:  # transformers before native Cohere ASR support
     from transformers import AutoModelForSpeechSeq2Seq as CohereAsrForConditionalGeneration
 
-from ensemble_common import needs_third_vote, transcript_similarity
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("media")
@@ -92,19 +89,13 @@ def main():
         for index, text in zip(indices, decoded):
             row = rows[index]
             row["cohere_source"] = str(text or "").strip()
-            row["qwen_cohere_similarity"] = round(
-                transcript_similarity(row.get("qwen_source", ""), row["cohere_source"]), 6
-            )
-            row["needs_third_vote"] = needs_third_vote(
-                row.get("qwen_source", ""), row["cohere_source"]
-            )
         reviewed += len(indices)
         print(f"Cohere review {reviewed}/{len(review_indices)}", flush=True)
         output_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
     output_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
-        f"Cohere reviewed={len(review_indices)} conflicts={sum(bool(x.get('needs_third_vote')) for x in rows)}",
+        f"Cohere reviewed={len(review_indices)}",
         flush=True,
     )
 

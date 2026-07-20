@@ -62,14 +62,45 @@ def review_reasons(row: dict) -> list[str]:
     return reasons
 
 
-def needs_third_vote(qwen_text: str, cohere_text: str, threshold: float = 0.72) -> bool:
+def acoustic_risk_reasons(row: dict) -> list[str]:
+    """Classify windows where quiet/overlapped/noisy speech deserves extra evidence."""
+    reasons: list[str] = []
+    rms_db = float(row.get("rms_db", -120.0))
+    crest_db = float(row.get("crest_db", 0.0))
+    high_frequency_ratio = float(row.get("high_frequency_ratio", 0.0))
+    spectral_flatness = float(row.get("spectral_flatness", 0.0))
+    speech_score = float(row.get("speech_score", 0.0))
+    nonlexical_score = float(row.get("nonlexical_score", 0.0))
+    if rms_db < -34.0:
+        reasons.append("very_quiet")
+    if crest_db >= 18.0:
+        reasons.append("strong_transients")
+    if high_frequency_ratio >= 0.08 or spectral_flatness >= 0.06:
+        reasons.append("broadband_noise")
+    if nonlexical_score >= 0.20 or (
+        nonlexical_score > 0 and speech_score < nonlexical_score * 2.2
+    ):
+        reasons.append("nonlexical_masking")
+    return reasons
+
+
+def needs_third_vote(
+    qwen_text: str,
+    cohere_text: str,
+    threshold: float = 0.72,
+    *,
+    acoustic_risk: bool = False,
+    speech_expected: bool = False,
+) -> bool:
     qwen = normalize_transcript(qwen_text)
     cohere = normalize_transcript(cohere_text)
     if not qwen and not cohere:
-        return False
+        return acoustic_risk or speech_expected
     if not qwen or not cohere:
         return True
-    return transcript_similarity(qwen_text, cohere_text) < threshold
+    similarity = transcript_similarity(qwen_text, cohere_text)
+    required = max(threshold, 0.86) if acoustic_risk else threshold
+    return similarity < required
 
 
 def choose_consensus(qwen_text: str, cohere_text: str, whisper_text: str) -> tuple[str, str, dict]:

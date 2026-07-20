@@ -34,8 +34,6 @@ def _validated(settings: CloudWorkerSettings) -> CloudWorkerSettings:
         raise CloudWorkerError("云服务器地址包含不支持的字符")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", settings.username.strip()):
         raise CloudWorkerError("云服务器用户名包含不支持的字符")
-    if not settings.password and not settings.private_key_path:
-        raise CloudWorkerError("请填写 SSH 密码或私钥路径")
     if settings.private_key_path and not Path(settings.private_key_path).expanduser().is_file():
         raise CloudWorkerError("SSH 私钥文件不存在")
     remote_dir = settings.remote_dir.strip().rstrip("/")
@@ -224,13 +222,15 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   if [ "$(id -u)" = 0 ]; then apt-get update && apt-get install -y ffmpeg; else sudo -n apt-get update && sudo -n apt-get install -y ffmpeg; fi
 fi
 mkdir -p {remote}/studio
-if [ ! -f {remote}/.worker-ready-v2 ]; then
+if [ ! -f {remote}/.worker-ready-v3 ]; then
   if [ ! -x {remote}/.venv/bin/python ]; then python3 -m venv --system-site-packages {remote}/.venv; fi
-  {remote}/.venv/bin/python -m pip install --upgrade pip
-  {remote}/.venv/bin/python -m pip install numpy openai-whisper transformers
+  {remote}/.venv/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn --upgrade pip \
+    || {remote}/.venv/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com --upgrade pip
+  {remote}/.venv/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn numpy soundfile openai-whisper faster-whisper transformers \
+    || {remote}/.venv/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com numpy soundfile openai-whisper faster-whisper transformers
 fi
 {remote}/.venv/bin/python -c 'import torch, whisper; print("torch=" + torch.__version__); print("cuda=" + str(torch.cuda.is_available())); assert torch.cuda.is_available(), "云节点 PyTorch 未启用 CUDA，请更换带 CUDA/PyTorch 的 GPU 镜像"'
-touch {remote}/.worker-ready-v2
+touch {remote}/.worker-ready-v3
 """
         output = self._exec("bash -lc " + shlex.quote(script), timeout=1800)
         return {"output": output.strip(), "remote_dir": self.settings.remote_dir}
@@ -243,11 +243,11 @@ touch {remote}/.worker-ready-v2
         script = f"""set -euo pipefail
 export OMP_NUM_THREADS=4
 mkdir -p {models}
-if [ -f {models}/.accuracy-ready-v2 ] \
+if [ -f {models}/.accuracy-ready-v3 ] \
   && [ -f {models}/weights/Qwen3-ASR-1.7B/config.json ] \
   && [ -f {models}/weights/Qwen3-ForcedAligner-0.6B/config.json ] \
   && [ -f {models}/weights/cohere-transcribe-03-2026/config.json ] \
-  && [ -f {models}/weights/whisper/large-v3.pt ]; then
+  && [ -f {models}/weights/faster-whisper-large-v3/model.bin ]; then
   echo "Accuracy ensemble already installed in {models}"
   exit 0
 fi
@@ -265,12 +265,16 @@ if [ ! -x {models}/envs/cohere/bin/python ]; then
   python3 -m venv --system-site-packages {models}/envs/cohere
 fi
 (
-  {models}/envs/qwen/bin/python -m pip install -U pip
-  {models}/envs/qwen/bin/python -m pip install -U qwen-asr modelscope soundfile nagisa soynlp
+  {models}/envs/qwen/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U pip \
+    || {models}/envs/qwen/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U pip
+  {models}/envs/qwen/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U qwen-asr modelscope soundfile nagisa soynlp \
+    || {models}/envs/qwen/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U qwen-asr modelscope soundfile nagisa soynlp
 ) & qwen_pip=$!
 (
-  {models}/envs/cohere/bin/python -m pip install -U pip
-  {models}/envs/cohere/bin/python -m pip install -U 'transformers>=5.4.0' accelerate sentencepiece protobuf soundfile librosa huggingface_hub
+  {models}/envs/cohere/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U pip \
+    || {models}/envs/cohere/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U pip
+  {models}/envs/cohere/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U 'transformers>=5.4.0' accelerate sentencepiece protobuf soundfile librosa huggingface_hub hf_xet modelscope \
+    || {models}/envs/cohere/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U 'transformers>=5.4.0' accelerate sentencepiece protobuf soundfile librosa huggingface_hub hf_xet modelscope
 ) & cohere_pip=$!
 wait "$qwen_pip"
 wait "$cohere_pip"
@@ -282,31 +286,29 @@ wait "$cohere_pip"
 ) & align_model=$!
 (
   if [ ! -f {models}/weights/cohere-transcribe-03-2026/config.json ]; then
-    export HF_ENDPOINT="${{HF_ENDPOINT:-https://hf-mirror.com}}"
-    if ! {models}/envs/cohere/bin/hf download CohereLabs/cohere-transcribe-03-2026 --local-dir {models}/weights/cohere-transcribe-03-2026; then
-      echo "Cohere Transcribe is gated. Accept its model license, run 'hf auth login' on the cloud node, then retry; HF_ENDPOINT may point to a reachable mirror." >&2
-      exit 24
+    if ! {models}/envs/cohere/bin/modelscope download --model CohereLabs/cohere-transcribe-03-2026 --local_dir {models}/weights/cohere-transcribe-03-2026; then
+      export HF_ENDPOINT="https://hf-mirror.com"
+      export HF_HUB_DOWNLOAD_TIMEOUT=600
+      if ! {models}/envs/cohere/bin/hf download CohereLabs/cohere-transcribe-03-2026 --local-dir {models}/weights/cohere-transcribe-03-2026; then
+        echo "Cohere Transcribe failed through ModelScope and hf-mirror; the Hugging Face fallback also requires accepting the model terms and a logged-in token." >&2
+        exit 24
+      fi
     fi
   fi
 ) & cohere_model=$!
 wait "$qwen_model"
 wait "$align_model"
 wait "$cohere_model"
-mkdir -p {models}/weights/whisper
-if [ ! -f {models}/weights/whisper/large-v3.pt ]; then
-  if [ -f /root/.cache/whisper/large-v3.pt ]; then
-    cp /root/.cache/whisper/large-v3.pt {models}/weights/whisper/large-v3.pt
-  else
-    {remote}/.venv/bin/python -c "import whisper; whisper.load_model('large-v3', device='cpu', download_root='{self.settings.model_dir}/weights/whisper')"
-  fi
+if [ ! -f {models}/weights/faster-whisper-large-v3/model.bin ]; then
+  {models}/envs/qwen/bin/modelscope download --model keepitsimple/faster-whisper-large-v3 --local_dir {models}/weights/faster-whisper-large-v3
 fi
 for name in Qwen3-ASR-1.7B Qwen3-ForcedAligner-0.6B cohere-transcribe-03-2026; do
   (cd {models}/weights/$name && find . -type f -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum > {models}/manifests/$name.sha256)
 done
-sha256sum {models}/weights/whisper/large-v3.pt > {models}/manifests/whisper-large-v3.sha256
+(cd {models}/weights/faster-whisper-large-v3 && find . -type f -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum > {models}/manifests/faster-whisper-large-v3.sha256)
 {models}/envs/qwen/bin/python -c 'import torch, qwen_asr; assert torch.cuda.is_available()'
 {models}/envs/cohere/bin/python -c 'import torch, transformers; assert torch.cuda.is_available(); print(transformers.__version__)'
-touch {models}/.accuracy-ready-v2
+touch {models}/.accuracy-ready-v3
 df -h {models}
 """
         output = self._exec("bash -lc " + shlex.quote(script), timeout=7200)
@@ -506,8 +508,11 @@ df -h {models}
         if accuracy:
             for name in (
                 "ensemble_common.py",
+                "prepare_audio_views.py",
+                "prepare_ensemble_windows.py",
                 "qwen_primary_stage.py",
                 "cohere_review_stage.py",
+                "merge_ensemble_reviews.py",
                 "whisper_conflict_vote.py",
                 "qwen_align_stage.py",
             ):
@@ -525,8 +530,16 @@ df -h {models}
         remote_work = posixpath.join(self.remote_job_dir, "accuracy_ensemble")
         self._mkdir(remote_work)
         remote_events = posixpath.join(remote_work, "events.json")
+        audio_views = posixpath.join(remote_work, "audio_views")
+        raw_audio = posixpath.join(audio_views, "raw_view.flac")
+        enhanced_audio = posixpath.join(audio_views, "conservative_enhanced_view.flac")
+        left_audio = posixpath.join(audio_views, "left_view.flac")
+        right_audio = posixpath.join(audio_views, "right_view.flac")
+        audio_report = posixpath.join(audio_views, "audio_view_report.json")
+        windows = posixpath.join(remote_work, "windows.json")
         primary = posixpath.join(remote_work, "qwen_primary.json")
-        reviewed = posixpath.join(remote_work, "cohere_reviewed.json")
+        cohere = posixpath.join(remote_work, "cohere_reviewed.json")
+        reviewed = posixpath.join(remote_work, "ensemble_merged.json")
         voted = posixpath.join(remote_work, "ensemble_voted.json")
         audit = posixpath.join(remote_work, "ensemble_audit.json")
         final = posixpath.join(remote_work, "source_sentences.json")
@@ -538,39 +551,69 @@ df -h {models}
         scripts = self.remote_job_dir
         audio = posixpath.join(self.remote_job_dir, "audio.flac")
 
-        commands = [
-            [
-                qwen_python, posixpath.join(scripts, "qwen_primary_stage.py"), audio,
-                "--events", remote_events, "--output", primary,
-                "--model", posixpath.join(models, "weights", "Qwen3-ASR-1.7B"),
-                "--language", language, "--speech-threshold", str(speech_threshold),
-                "--nonlexical-factor", str(nonlexical_factor), "--batch-size", "4",
-            ],
-            [
-                cohere_python, posixpath.join(scripts, "cohere_review_stage.py"), audio,
-                "--input", primary, "--output", reviewed,
-                "--model", posixpath.join(models, "weights", "cohere-transcribe-03-2026"),
-                "--language", language, "--batch-size", "4", "--review-all",
-            ],
-            [
-                whisper_python, posixpath.join(scripts, "whisper_conflict_vote.py"), audio,
-                "--input", reviewed, "--output", voted, "--audit", audit,
-                "--model", posixpath.join(models, "weights", "whisper", "large-v3.pt"),
-                "--language", language,
-            ],
-            [
-                qwen_python, posixpath.join(scripts, "qwen_align_stage.py"), audio,
-                "--input", voted, "--output", final,
-                "--model", posixpath.join(models, "weights", "Qwen3-ForcedAligner-0.6B"),
-                "--language", language, "--batch-size", "8",
-            ],
-        ]
-        for index, args in enumerate(commands, 1):
-            self.logger(f"最高精度识别阶段 {index}/4")
-            command = "env OMP_NUM_THREADS=4 " + " ".join(shlex.quote(value) for value in args)
-            self._exec(command, controllable=True)
+        def command(args: list[str]) -> str:
+            return "env OMP_NUM_THREADS=4 " + " ".join(shlex.quote(value) for value in args)
+
+        self.logger("最高精度识别阶段 1/5：分析声道并生成原始/保守增强双视图")
+        self._exec(command([
+            whisper_python, posixpath.join(scripts, "prepare_audio_views.py"), audio,
+            "--workdir", audio_views,
+        ]), controllable=True)
+        self._exec(command([
+            qwen_python, posixpath.join(scripts, "prepare_ensemble_windows.py"), raw_audio,
+            "--events", remote_events, "--output", windows,
+        ]), controllable=True)
+
+        qwen_command = command([
+            qwen_python, posixpath.join(scripts, "qwen_primary_stage.py"), raw_audio,
+            "--events", remote_events, "--windows", windows, "--output", primary,
+            "--model", posixpath.join(models, "weights", "Qwen3-ASR-1.7B"),
+            "--language", language, "--speech-threshold", str(speech_threshold),
+            "--nonlexical-factor", str(nonlexical_factor), "--batch-size", "3",
+        ])
+        cohere_command = command([
+            cohere_python, posixpath.join(scripts, "cohere_review_stage.py"), enhanced_audio,
+            "--input", windows, "--output", cohere,
+            "--model", posixpath.join(models, "weights", "cohere-transcribe-03-2026"),
+            "--language", language, "--batch-size", "3", "--review-all",
+        ])
+        self.logger("最高精度识别阶段 2/5：Qwen 原始音频与 Cohere 增强音频并行识别")
+        parallel = (
+            f"set +e; ({qwen_command}) & qwen_pid=$!; ({cohere_command}) & cohere_pid=$!; "
+            "wait $qwen_pid; qwen_status=$?; wait $cohere_pid; cohere_status=$?; "
+            "if [ $qwen_status -ne 0 ] || [ $cohere_status -ne 0 ]; then "
+            "echo \"parallel ASR failed: qwen=$qwen_status cohere=$cohere_status\" >&2; exit 31; fi"
+        )
+        self._exec(parallel, controllable=True)
+
+        self.logger("最高精度识别阶段 3/5：合并双模型证据并标记冲突")
+        self._exec(command([
+            qwen_python, posixpath.join(scripts, "merge_ensemble_reviews.py"),
+            "--qwen", primary, "--cohere", cohere, "--output", reviewed,
+        ]), controllable=True)
+
+        self.logger("最高精度识别阶段 4/5：large-v3 仅裁决冲突区间")
+        self._exec(command([
+            whisper_python, posixpath.join(scripts, "whisper_conflict_vote.py"), raw_audio,
+            "--input", reviewed, "--output", voted, "--audit", audit,
+            "--model", posixpath.join(models, "weights", "faster-whisper-large-v3"),
+            "--language", language, "--left", left_audio, "--right", right_audio,
+            "--audio-report", audio_report,
+        ]), controllable=True)
+
+        self.logger("最高精度识别阶段 5/5：Qwen ForcedAligner 恢复时间轴")
+        self._exec(command([
+            qwen_python, posixpath.join(scripts, "qwen_align_stage.py"), raw_audio,
+            "--input", voted, "--output", final,
+            "--model", posixpath.join(models, "weights", "Qwen3-ForcedAligner-0.6B"),
+            "--language", language, "--batch-size", "8",
+        ]), controllable=True)
         self._download(final, local_workdir / "source_sentences.json")
         self._download(audit, local_workdir / "ensemble_audit.json")
+        self._download(
+            posixpath.join(audio_views, "audio_view_report.json"),
+            local_workdir / "audio_view_report.json",
+        )
 
     def run_event_gate(self, vad_path: Path, local_events_path: Path):
         remote_work = posixpath.join(self.remote_job_dir, "event_gate")

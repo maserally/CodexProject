@@ -22,6 +22,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("media")
     parser.add_argument("--events", required=True)
+    parser.add_argument("--windows")
     parser.add_argument("--output", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--language", choices=("ja", "ko"), required=True)
@@ -35,13 +36,16 @@ def main():
     audio, sample_rate = sf.read(args.media, dtype="float32", always_2d=False)
     if getattr(audio, "ndim", 1) > 1:
         audio = audio.mean(axis=1)
-    windows = select_windows(
-        events,
-        args.speech_threshold,
-        args.nonlexical_factor,
-        duration=len(audio) / sample_rate,
-        full_coverage=not args.event_gated,
-    )
+    if args.windows:
+        windows = json.loads(Path(args.windows).read_text(encoding="utf-8"))
+    else:
+        windows = select_windows(
+            events,
+            args.speech_threshold,
+            args.nonlexical_factor,
+            duration=len(audio) / sample_rate,
+            full_coverage=not args.event_gated,
+        )
 
     model = Qwen3ASRModel.from_pretrained(
         args.model,

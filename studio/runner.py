@@ -579,16 +579,16 @@ class JobManager:
                 status="running",
                 stage="本地提取云识别音轨",
                 progress=0.01,
-                log="原视频保留在本机，仅向云节点上传单声道 FLAC 音轨",
+                log="原视频保留在本机，仅向云节点上传双声道保真 FLAC 音轨；云端会自动判断真立体声或双单声道",
             )
             analysis_media = workdir / "cloud_audio.flac"
             if analysis_media.exists() and analysis_media.stat().st_size:
-                self.update(job, log="复用预上传阶段生成的本地 16 kHz 单声道 FLAC 音轨")
+                self.update(job, log="复用预上传阶段生成的本地 16 kHz 双声道保真 FLAC 音轨")
             else:
                 self.run_command(
                     job,
                     [
-                        "ffmpeg", "-y", "-i", str(media), "-vn", "-ac", "1", "-ar", "16000",
+                        "ffmpeg", "-y", "-i", str(media), "-vn", "-ac", "2", "-ar", "16000",
                         "-c:a", "flac", "-compression_level", "8", str(analysis_media),
                     ],
                 )

@@ -1,5 +1,14 @@
 # 字幕翻译工作室
 
+## 1.16.0 复杂场景云端判决
+
+- 本机只抽取并校验 16 kHz 双声道 FLAC，不在本机安装 Qwen、Cohere、ForcedAligner 或其模型权重。
+- 云节点首次连接自动安装运行依赖并下载模型：Python 包优先清华/阿里源，Qwen、Cohere 和对齐模型优先 ModelScope。
+- Qwen3-ASR 使用原始音频、Cohere Transcribe 使用保守增强音频并行覆盖全片。
+- 结合弱声、瞬态、宽带噪声、非语言声和双模型文本一致性自动标记冲突；large-v3 只处理冲突窗口。
+- 真立体声冲突窗口分别检查中置混音、左声道、右声道；双单声道不会重复浪费算力。
+- 最终文本由 Qwen3-ForcedAligner 恢复时间轴，所有模型阶段都保留断点文件。
+
 支持 Windows 本地运行与 Linux/AutoDL 云 GPU 模式。云端部署、SSH 隧道、持久化目录和密钥配置见 [CLOUD_DEPLOY.md](CLOUD_DEPLOY.md)。
 
 Windows 本地工作室也可以连接一台临时云 GPU 作为 Whisper 运算单元：在网页填写 SSH 地址、端口、用户名及密码或私钥，点击“连接并安装运算环境”。程序会在本机从视频提取 FLAC 音轨，只把音轨与识别分段上传到云端；识别 JSON 返回后，其余翻译、自动语境校正、字幕和视频产物仍在本地完成。

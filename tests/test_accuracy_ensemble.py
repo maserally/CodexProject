@@ -1,6 +1,7 @@
 import unittest
 
 from ensemble_common import (
+    acoustic_risk_reasons,
     choose_consensus,
     full_coverage_windows,
     needs_third_vote,
@@ -25,6 +26,34 @@ class AccuracyEnsembleTests(unittest.TestCase):
         self.assertTrue(needs_third_vote("小さい声です", ""))
         self.assertTrue(needs_third_vote("", "小さい声です"))
         self.assertFalse(needs_third_vote("", ""))
+
+    def test_both_empty_starts_whisper_when_complex_speech_is_expected(self):
+        self.assertTrue(needs_third_vote("", "", acoustic_risk=True))
+        self.assertTrue(needs_third_vote("", "", speech_expected=True))
+
+    def test_complex_audio_requires_stronger_two_model_agreement(self):
+        left = "今日はとても気持ちいい"
+        right = "今日は気持ちいい"
+        self.assertFalse(needs_third_vote(left, right, threshold=0.72))
+        self.assertTrue(
+            needs_third_vote(left, right, threshold=0.72, acoustic_risk=True)
+        )
+
+    def test_acoustic_risk_detects_quiet_transient_noisy_window(self):
+        reasons = acoustic_risk_reasons(
+            {
+                "rms_db": -41,
+                "crest_db": 21,
+                "high_frequency_ratio": 0.10,
+                "spectral_flatness": 0.08,
+                "speech_score": 0.5,
+                "nonlexical_score": 0.3,
+            }
+        )
+        self.assertIn("very_quiet", reasons)
+        self.assertIn("strong_transients", reasons)
+        self.assertIn("broadband_noise", reasons)
+        self.assertIn("nonlexical_masking", reasons)
 
     def test_third_vote_selects_pairwise_consensus(self):
         text, winner, scores = choose_consensus(

@@ -7,7 +7,61 @@ from pathlib import Path
 import torch
 import whisper
 
-from ensemble_common import choose_consensus, normalize_transcript
+from ensemble_common import choose_consensus, normalize_transcript, transcript_similarity
+
+
+def best_whisper_view(qwen_text: str, cohere_text: str, candidates: dict[str, str]):
+    scores = {
+        name: transcript_similarity(text, qwen_text) + transcript_similarity(text, cohere_text)
+        for name, text in candidates.items()
+    }
+    winner = max(scores, key=lambda name: (scores[name], len(normalize_transcript(candidates[name]))))
+    return candidates[winner], winner, scores
+
+
+def load_large_v3(model_path: str):
+    path = Path(model_path)
+    if path.is_dir():
+        from faster_whisper import WhisperModel
+
+        model = WhisperModel(
+            str(path),
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            compute_type="float16" if torch.cuda.is_available() else "int8",
+            local_files_only=True,
+        )
+
+        def transcribe(clip, language: str) -> str:
+            segments, _ = model.transcribe(
+                clip,
+                language=language,
+                task="transcribe",
+                beam_size=5,
+                temperature=0,
+                condition_on_previous_text=False,
+                vad_filter=False,
+            )
+            return "".join(str(segment.text or "") for segment in segments).strip()
+
+        return transcribe
+
+    model = whisper.load_model(
+        model_path, device="cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    def transcribe(clip, language: str) -> str:
+        result = model.transcribe(
+            clip,
+            language=language,
+            task="transcribe",
+            fp16=torch.cuda.is_available(),
+            temperature=0,
+            condition_on_previous_text=False,
+            verbose=False,
+        )
+        return str(result.get("text") or "").strip()
+
+    return transcribe
 
 
 def main():
@@ -18,6 +72,9 @@ def main():
     parser.add_argument("--audit", required=True)
     parser.add_argument("--model", default="large-v3")
     parser.add_argument("--language", choices=("ja", "ko"), required=True)
+    parser.add_argument("--left")
+    parser.add_argument("--right")
+    parser.add_argument("--audio-report")
     args = parser.parse_args()
 
     rows = json.loads(Path(args.input).read_text(encoding="utf-8"))
@@ -40,11 +97,18 @@ def main():
         index for index, row in enumerate(rows)
         if row.get("needs_third_vote") and not row.get("ensemble_resolved")
     ]
-    model = None
-    audio = None
+    transcribe_large_v3 = None
+    audio_views = None
     if conflict_indices:
-        audio = whisper.load_audio(args.media)
-        model = whisper.load_model(args.model, device="cuda" if torch.cuda.is_available() else "cpu")
+        audio_views = {"mid": whisper.load_audio(args.media)}
+        layout = "mono"
+        if args.audio_report and Path(args.audio_report).exists():
+            report = json.loads(Path(args.audio_report).read_text(encoding="utf-8"))
+            layout = str(report.get("layout", "mono"))
+        if layout == "true_stereo" and args.left and args.right:
+            audio_views["left"] = whisper.load_audio(args.left)
+            audio_views["right"] = whisper.load_audio(args.right)
+        transcribe_large_v3 = load_large_v3(args.model)
 
     audit = []
     if audit_path.exists():
@@ -61,18 +125,16 @@ def main():
         qwen_text = str(row.get("qwen_source") or "").strip()
         cohere_text = str(row.get("cohere_source") or "").strip()
         whisper_text = ""
+        whisper_view = "mid"
+        whisper_view_scores = {}
         if row.get("needs_third_vote"):
-            clip = audio[int(row["start"] * 16000) : int(row["end"] * 16000)]
-            result = model.transcribe(
-                clip,
-                language=args.language,
-                task="transcribe",
-                fp16=torch.cuda.is_available(),
-                temperature=0,
-                condition_on_previous_text=False,
-                verbose=False,
+            view_candidates = {}
+            for view_name, view_audio in audio_views.items():
+                clip = view_audio[int(row["start"] * 16000) : int(row["end"] * 16000)]
+                view_candidates[view_name] = transcribe_large_v3(clip, args.language)
+            whisper_text, whisper_view, whisper_view_scores = best_whisper_view(
+                qwen_text, cohere_text, view_candidates
             )
-            whisper_text = str(result.get("text") or "").strip()
             print(f"large-v3 conflict {number}/{len(rows)}", flush=True)
 
         if whisper_text:
@@ -94,6 +156,8 @@ def main():
                 "cohere_whisper": 0.0,
             }
         row["whisper_source"] = whisper_text
+        row["whisper_view"] = whisper_view
+        row["whisper_view_scores"] = whisper_view_scores
         row["final_source"] = final_text
         row["ensemble_winner"] = winner
         row["similarities"] = similarities
@@ -110,6 +174,8 @@ def main():
                 "qwen": qwen_text,
                 "cohere": cohere_text,
                 "whisper": whisper_text,
+                "whisper_view": whisper_view,
+                "whisper_view_scores": whisper_view_scores,
                 "winner": winner,
                 "confidence": row["ensemble_confidence"],
                 "similarities": similarities,
