@@ -411,7 +411,7 @@ def list_jobs():
 
 def _cleanup_preuploaded_audio(job):
     if not job or not (job.status == "staged" or job.options.cloud_stage_only):
-        return
+        return ""
     saved = load_provider_settings(expose_secrets=True)
     worker_settings = job.cloud_worker_settings or CloudWorkerSettings.model_validate(
         saved.get("cloud_worker", {})
@@ -421,6 +421,11 @@ def _cleanup_preuploaded_audio(job):
         worker.connect()
         worker.remote_job_dir = posixpath.join(worker.settings.remote_dir, "jobs", job.id)
         worker.cleanup_job()
+        return ""
+    except Exception as exc:
+        # Local task deletion must remain possible when a disposable GPU node
+        # has been shut down, cloned, or had its SSH credentials changed.
+        return f"云端临时目录未确认清理：{exc}"
     finally:
         worker.close()
 
@@ -430,11 +435,14 @@ def _bulk_job_action(action: str, eligible_statuses: set[str]):
     targets = [job["id"] for job in jobs if job["status"] in eligible_statuses]
     succeeded = []
     failed = []
+    warnings = []
     for job_id in targets:
         try:
             if action == "delete":
-                _cleanup_preuploaded_audio(manager.get(job_id))
+                warning = _cleanup_preuploaded_audio(manager.get(job_id))
                 manager.delete(job_id)
+                if warning:
+                    warnings.append({"id": job_id, "warning": warning})
             else:
                 getattr(manager, action)(job_id)
             succeeded.append(job_id)
@@ -446,6 +454,7 @@ def _bulk_job_action(action: str, eligible_statuses: set[str]):
         "count": len(succeeded),
         "succeeded": succeeded,
         "failed": failed,
+        "warnings": warnings,
     }
 
 
@@ -604,18 +613,13 @@ def retry_failed_job(job_id: str):
 def delete_job(job_id: str):
     try:
         job = manager.get(job_id)
-        _cleanup_preuploaded_audio(job)
+        warning = _cleanup_preuploaded_audio(job)
         deleted = manager.delete(job_id)
-        return {"ok": True, "deleted": str(deleted)}
+        return {"ok": True, "deleted": str(deleted), "warning": warning}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务不存在") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"无法清理云端预上传音轨，任务尚未删除：{exc}",
-        ) from exc
 
 
 def _job_action(job_id: str, action: str):

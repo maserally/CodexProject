@@ -359,7 +359,20 @@ class JobManager:
             raise KeyError(job_id)
         if job.status not in {"queued", "running", "paused"}:
             raise RuntimeError("任务已经结束")
-        control = self._control(job_id)
+        with self.lock:
+            control = self.controls.get(job_id)
+        if not control:
+            # Persisted paused jobs have no live process after an application
+            # restart. They are already stopped and can be canceled directly.
+            if job.status == "paused":
+                self.update(
+                    job,
+                    status="canceled",
+                    stage="任务已取消",
+                    log="已取消重启前暂停的任务；当前没有活动进程",
+                )
+                return job
+            raise RuntimeError("该任务当前没有可控制的运行进程")
         control.cancel_event.set()
         control.run_gate.set()
         if job.cloud_session:

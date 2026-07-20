@@ -138,6 +138,27 @@ class TaskManagementTests(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(errors, [])
 
+    def test_persisted_paused_job_can_be_canceled_without_live_control(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with patch("studio.runner.JOBS_DIR", root / "jobs"), patch(
+                "studio.runner.UPLOADS_DIR", root / "uploads"
+            ):
+                manager = JobManager()
+                job = JobState(
+                    id="persisted-paused",
+                    options=JobOptions(input_path="movie.mp4", cloud_stage_only=True),
+                    status="paused",
+                    stage="已暂停 · 等待云节点",
+                )
+                manager.jobs[job.id] = job
+
+                canceled = manager.cancel(job.id)
+
+                self.assertEqual(canceled.status, "canceled")
+                self.assertNotIn(job.id, manager.controls)
+                self.assertIn("没有活动进程", canceled.logs[-1])
+
     def test_pause_resume_cancel_and_safe_delete(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
