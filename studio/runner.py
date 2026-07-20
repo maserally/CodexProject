@@ -251,7 +251,10 @@ class JobManager:
         control.previous_stage = job.stage
         control.run_gate.clear()
         if job.cloud_session:
-            job.cloud_session.pause_current()
+            try:
+                job.cloud_session.pause_current()
+            except Exception as exc:
+                self.update(job, log=f"云端暂停信号未确认，将保留本地暂停状态：{exc}")
         for process in self._processes(control.process):
             try:
                 process.suspend()
@@ -268,7 +271,10 @@ class JobManager:
             raise RuntimeError("任务当前没有暂停")
         control = self._control(job_id)
         if job.cloud_session:
-            job.cloud_session.resume_current()
+            try:
+                job.cloud_session.resume_current()
+            except Exception as exc:
+                self.update(job, log=f"云端继续信号未确认：{exc}")
         for process in reversed(self._processes(control.process)):
             try:
                 process.resume()
@@ -333,7 +339,10 @@ class JobManager:
         control.cancel_event.set()
         control.run_gate.set()
         if job.cloud_session:
-            job.cloud_session.cancel_current()
+            try:
+                job.cloud_session.cancel_current()
+            except Exception as exc:
+                self.update(job, log=f"云端停止信号未确认，将继续清理本地状态：{exc}")
         processes = self._processes(control.process)
         for process in processes:
             try:
