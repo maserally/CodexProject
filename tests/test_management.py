@@ -161,12 +161,47 @@ class TaskManagementTests(unittest.TestCase):
                 self.assertFalse(deleted.exists())
                 self.assertIsNone(manager.get(job.id))
 
+    def test_paused_job_survives_restart_and_output_settings_can_change(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            jobs = root / "jobs"
+            uploads = root / "uploads"
+            with patch("studio.runner.JOBS_DIR", jobs), patch(
+                "studio.runner.UPLOADS_DIR", uploads
+            ):
+                manager = JobManager()
+                job = JobState(
+                    id="paused-job",
+                    options=JobOptions(
+                        input_path="movie.mp4",
+                        create_soft_subtitle_video=True,
+                    ),
+                    status="paused",
+                    stage="已暂停 · 日语语音识别",
+                    progress=0.57,
+                )
+                manager.jobs[job.id] = job
+                manager.persist(job)
+
+                restored = JobManager()
+                loaded = restored.get(job.id)
+                self.assertEqual(loaded.status, "paused")
+                self.assertNotIn(job.id, restored.controls)
+                restored.apply_output_settings(
+                    job.id,
+                    create_soft_subtitle_video=False,
+                    create_hard_subtitle_video=False,
+                )
+                self.assertFalse(loaded.options.create_soft_subtitle_video)
+                self.assertFalse(loaded.options.create_hard_subtitle_video)
+
     def test_task_control_routes_are_registered(self):
         paths = {route.path for route in app.routes}
         self.assertIn("/api/jobs/{job_id}/pause", paths)
         self.assertIn("/api/jobs/{job_id}/resume", paths)
         self.assertIn("/api/jobs/{job_id}/cancel", paths)
         self.assertIn("/api/jobs/actions/pause-all", paths)
+        self.assertIn("/api/jobs/actions/resume-all", paths)
         self.assertIn("/api/jobs/actions/cancel-all", paths)
         self.assertIn("/api/jobs/actions/delete-finished", paths)
         self.assertIn("/api/jobs/actions/start-staged-all", paths)

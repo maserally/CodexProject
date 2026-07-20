@@ -41,6 +41,7 @@ from .schemas import (
     FolderPickerRequest,
     FolderScanRequest,
     JobOptions,
+    JobOutputSettings,
     ModelListRequest,
     SavedProviderSettings,
 )
@@ -52,7 +53,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.13.3")
+app = FastAPI(title="字幕翻译工作室", version="1.13.4")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -430,6 +431,38 @@ def _bulk_job_action(action: str, eligible_statuses: set[str]):
 @app.post("/api/jobs/actions/pause-all")
 def pause_all_jobs():
     return _bulk_job_action("pause", {"queued", "running"})
+
+
+@app.post("/api/jobs/actions/resume-all")
+def resume_all_jobs(output_settings: JobOutputSettings):
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    targets = [job["id"] for job in manager.list() if job["status"] == "paused"]
+    succeeded = []
+    failed = []
+    for job_id in targets:
+        try:
+            job = manager.get(job_id)
+            job.options = resolve_provider_api_keys(job.options)
+            manager.apply_output_settings(
+                job_id,
+                create_soft_subtitle_video=output_settings.create_soft_subtitle_video,
+                create_hard_subtitle_video=output_settings.create_hard_subtitle_video,
+            )
+            if job_id in manager.controls:
+                manager.resume(job_id)
+            else:
+                manager.recover_paused(job_id, worker if worker.enabled else None)
+            succeeded.append(job_id)
+        except (KeyError, RuntimeError) as exc:
+            failed.append({"id": job_id, "error": str(exc)})
+    return {
+        "ok": not failed,
+        "action": "resume-all",
+        "count": len(succeeded),
+        "succeeded": succeeded,
+        "failed": failed,
+    }
 
 
 @app.post("/api/jobs/actions/cancel-all")

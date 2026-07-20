@@ -120,3 +120,8 @@ class SavedProviderSettings(BaseModel):
 
 class CloudWorkerRequest(BaseModel):
     cloud_worker: CloudWorkerSettings
+
+
+class JobOutputSettings(BaseModel):
+    create_soft_subtitle_video: bool = False
+    create_hard_subtitle_video: bool = False

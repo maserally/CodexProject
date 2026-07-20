@@ -116,10 +116,13 @@ class JobManager:
                 status = data.get("status", "failed")
                 stage = data.get("stage", "")
                 error = data.get("error", "")
-                if status in {"queued", "running", "paused"}:
+                if status in {"queued", "running"}:
                     status = "failed"
                     stage = "上次运行被中断"
                     error = "软件上次关闭时任务尚未完成，请重新创建任务"
+                elif status == "paused":
+                    stage = "已暂停 · 可安全恢复"
+                    error = ""
                 job = JobState(
                     id=data["id"],
                     options=options,
@@ -278,6 +281,46 @@ class JobManager:
             stage=control.previous_stage,
             log="任务已继续",
         )
+        return job
+
+    def apply_output_settings(
+        self,
+        job_id: str,
+        *,
+        create_soft_subtitle_video: bool,
+        create_hard_subtitle_video: bool,
+    ):
+        job = self.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        if job.status not in {"queued", "running", "paused", "staged"}:
+            raise RuntimeError("只有未完成的任务可以修改产物设置")
+        job.options.create_soft_subtitle_video = create_soft_subtitle_video
+        job.options.create_hard_subtitle_video = create_hard_subtitle_video
+        self.persist(job)
+        return job
+
+    def recover_paused(
+        self,
+        job_id: str,
+        cloud_worker_settings: CloudWorkerSettings | None = None,
+    ):
+        """Restart a persisted paused job after the application was restarted."""
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job.status != "paused":
+                raise RuntimeError("任务当前没有暂停")
+            if job_id in self.controls:
+                raise RuntimeError("任务仍有可继续的运行进程")
+            job.cloud_worker_settings = cloud_worker_settings
+            job.status = "queued"
+            job.stage = "已恢复，等待重新连接云端已上传音轨"
+            job.error = ""
+            self.controls[job.id] = JobControl()
+        self.update(job, progress=min(job.progress, 0.20), log="软件重启后恢复任务，将复用已校验的云端音轨")
+        threading.Thread(target=self._run_guarded, args=(job,), daemon=True).start()
         return job
 
     def cancel(self, job_id: str):
