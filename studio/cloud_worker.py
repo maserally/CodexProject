@@ -47,6 +47,10 @@ def _validated(settings: CloudWorkerSettings) -> CloudWorkerSettings:
     if not model_dir.startswith("/") or not re.fullmatch(r"/[A-Za-z0-9._/-]+", model_dir):
         raise CloudWorkerError("云端模型目录必须是只含英文、数字、点、横线的绝对路径")
     result.model_dir = model_dir
+    data_dir = settings.data_dir.strip().rstrip("/")
+    if not data_dir.startswith("/") or not re.fullmatch(r"/[A-Za-z0-9._/-]+", data_dir):
+        raise CloudWorkerError("云端任务数据目录必须是只含英文、数字、点、横线的绝对路径")
+    result.data_dir = data_dir
     return result
 
 
@@ -64,6 +68,7 @@ class CloudWhisperWorker:
         self.client = None
         self.sftp = None
         self.remote_job_dir = ""
+        self.legacy_job_dir = ""
         self.active_control_file = ""
 
     def connect(self):
@@ -321,6 +326,26 @@ df -h {models}
     def _mkdir(self, remote_path: str):
         self._exec("mkdir -p " + shlex.quote(remote_path), timeout=30)
 
+    def set_job_dir(self, job_id: str, *, migrate_legacy: bool = True):
+        """Put uploaded audio and all per-job intermediates on the data disk."""
+        self.remote_job_dir = posixpath.join(self.settings.data_dir, job_id)
+        self.legacy_job_dir = posixpath.join(self.settings.remote_dir, "jobs", job_id)
+        if not migrate_legacy:
+            return
+        target_parent = shlex.quote(self.settings.data_dir)
+        target = shlex.quote(self.remote_job_dir)
+        legacy = shlex.quote(self.legacy_job_dir)
+        output = self._exec(
+            f"mkdir -p {target_parent}; "
+            f"if [ ! -e {target} ] && [ -d {legacy} ]; then "
+            f"mv -- {legacy} {target}; echo migrated-legacy-job; "
+            "fi; "
+            f"mkdir -p {target}; df -Pk {target} | tail -n 1",
+            timeout=600,
+        )
+        if "migrated-legacy-job" in output:
+            self.logger("已将旧版系统盘预上传任务迁移到云端数据盘")
+
     def _upload(self, local_path: Path, remote_path: str, label: str):
         if not self.sftp:
             raise CloudWorkerError("云节点文件通道尚未连接")
@@ -479,14 +504,13 @@ df -h {models}
     def stage_job_audio(self, job_id: str, audio_path: Path) -> dict[str, object]:
         if not self.client:
             self.connect()
-        self.remote_job_dir = posixpath.join(self.settings.remote_dir, "jobs", job_id)
-        self._mkdir(self.remote_job_dir)
+        self.set_job_dir(job_id)
         return self._ensure_verified_audio(audio_path)
 
     def prepare_job(self, job_id: str, audio_path: Path, *, accuracy: bool = False):
         if not self.client:
             self.connect()
-        self.remote_job_dir = posixpath.join(self.settings.remote_dir, "jobs", job_id)
+        self.set_job_dir(job_id)
         if self.settings.auto_setup:
             self.logger("检查并安装云节点运算依赖")
             if accuracy:
@@ -697,5 +721,12 @@ df -h {models}
 
     def cleanup_job(self):
         if self.remote_job_dir:
-            self._exec("rm -rf -- " + shlex.quote(self.remote_job_dir), timeout=60)
+            targets = [self.remote_job_dir]
+            if self.legacy_job_dir and self.legacy_job_dir != self.remote_job_dir:
+                targets.append(self.legacy_job_dir)
+            self._exec(
+                "rm -rf -- " + " ".join(shlex.quote(path) for path in targets),
+                timeout=60,
+            )
             self.remote_job_dir = ""
+            self.legacy_job_dir = ""

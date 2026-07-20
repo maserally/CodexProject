@@ -141,6 +141,7 @@ class CloudWorkerTests(unittest.TestCase):
             )
         )
         self.assertEqual(valid.port, 2222)
+        self.assertEqual(valid.data_dir, "/root/autodl-tmp/subtitle-jobs")
         with self.assertRaises(CloudWorkerError):
             _validated(
                 CloudWorkerSettings(
@@ -150,6 +151,26 @@ class CloudWorkerTests(unittest.TestCase):
                     password="secret",
                 )
             )
+
+    def test_job_directory_uses_data_disk_and_migrates_legacy_directory(self):
+        worker = CloudWhisperWorker(
+            CloudWorkerSettings(
+                enabled=True,
+                host="gpu.example.com",
+                data_dir="/root/autodl-tmp/subtitle-jobs",
+            )
+        )
+        worker._exec = MagicMock(return_value="migrated-legacy-job\n/dev/vdb 1 1 1 1% /root/autodl-tmp")
+        worker.set_job_dir("job-123")
+        self.assertEqual(
+            worker.remote_job_dir, "/root/autodl-tmp/subtitle-jobs/job-123"
+        )
+        self.assertEqual(
+            worker.legacy_job_dir, "/root/subtitle-worker/jobs/job-123"
+        )
+        command = worker._exec.call_args.args[0]
+        self.assertIn("mv -- /root/subtitle-worker/jobs/job-123", command)
+        self.assertIn("/root/autodl-tmp/subtitle-jobs/job-123", command)
 
     def test_worker_credentials_never_enter_task_status(self):
         worker = CloudWorkerSettings(

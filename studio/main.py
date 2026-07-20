@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import binascii
 import os
-import posixpath
 import re
 import secrets
 import shutil
@@ -53,7 +52,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.17.0")
+app = FastAPI(title="字幕翻译工作室", version="1.17.1")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -419,7 +418,7 @@ def _cleanup_preuploaded_audio(job):
     worker = CloudWhisperWorker(worker_settings)
     try:
         worker.connect()
-        worker.remote_job_dir = posixpath.join(worker.settings.remote_dir, "jobs", job.id)
+        worker.set_job_dir(job.id, migrate_legacy=False)
         worker.cleanup_job()
         return ""
     except Exception as exc:

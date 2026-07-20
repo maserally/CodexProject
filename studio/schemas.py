@@ -26,6 +26,7 @@ class CloudWorkerSettings(BaseModel):
     private_key_path: str = ""
     remote_dir: str = "/root/subtitle-worker"
     model_dir: str = "/root/autodl-tmp/subtitle-models"
+    data_dir: str = "/root/autodl-tmp/subtitle-jobs"
     auto_setup: bool = True
 
 
