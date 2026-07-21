@@ -308,7 +308,16 @@ if [ -f "$models_root/.accuracy-ready-v4" ] && accuracy_models_complete; then
   echo "Accuracy ensemble already installed and shard-verified in $models_root"
   exit 0
 fi
-rm -f "$models_root/.accuracy-ready-v3" "$models_root/.accuracy-ready-v4"
+gpu_available=0
+if python3 -c 'import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
+  gpu_available=1
+fi
+if [ "$gpu_available" -eq 0 ] && [ -f "$models_root/.accuracy-downloaded-v4" ] && accuracy_models_complete; then
+  echo "ACCURACY_MODELS_DOWNLOADED_NO_GPU"
+  echo "Accuracy models are fully downloaded; GPU load verification is deferred until GPU startup"
+  exit 0
+fi
+rm -f "$models_root/.accuracy-ready-v3" "$models_root/.accuracy-ready-v4" "$models_root/.accuracy-downloaded-v4"
 mkdir -p "$models_root/weights"
 available_kb=$(df -Pk {models} | awk 'NR==2 {{print $4}}')
 existing_kb=$(du -sk "$models_root/weights" 2>/dev/null | awk '{{print $1}}')
@@ -393,6 +402,13 @@ for name in Qwen3-ASR-1.7B Qwen3-ForcedAligner-0.6B cohere-transcribe-03-2026; d
   (cd "$models_root/weights/$name" && find . -type f -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum > "$models_root/manifests/$name.sha256")
 done
 (cd "$models_root/weights/faster-whisper-large-v3" && find . -type f -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum > "$models_root/manifests/faster-whisper-large-v3.sha256")
+touch "$models_root/.accuracy-downloaded-v4"
+if [ "$gpu_available" -eq 0 ]; then
+  echo "ACCURACY_MODELS_DOWNLOADED_NO_GPU"
+  echo "All model files and shards passed validation; GPU load verification is deferred until GPU startup"
+  df -h "$models_root"
+  exit 0
+fi
 "$models_root/envs/qwen/bin/python" - "$models_root/weights/Qwen3-ASR-1.7B" <<'PY'
 import sys
 import torch
@@ -420,6 +436,7 @@ df -h "$models_root"
             "output": output.strip(),
             "remote_dir": self.settings.remote_dir,
             "model_dir": self.settings.model_dir,
+            "gpu_verified": "ACCURACY_MODELS_DOWNLOADED_NO_GPU" not in output,
         }
 
     def _mkdir(self, remote_path: str):

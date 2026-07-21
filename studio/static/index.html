@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.19.1">
+  <link rel="stylesheet" href="/static/style.css?v=1.19.2">
 </head>
 <body>
   <main class="shell">
@@ -123,7 +123,7 @@
           <label>预上传与任务数据盘目录<input id="cloud-worker-data-dir" value="/root/autodl-tmp/subtitle-jobs"><small class="field-help">预上传 FLAC、分段和识别中间文件全部存放在这里，不占系统盘</small></label>
         </div>
         <label><input id="cloud-worker-auto-setup" type="checkbox" checked>首次连接自动安装全部依赖并从国内源下载模型</label>
-        <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">安装基础环境</button><button id="bootstrap-accuracy-worker" type="button">安装并校验全部模型</button></div>
+        <div class="cloud-worker-actions"><button id="test-cloud-worker" type="button">测试连接</button><button id="bootstrap-cloud-worker" type="button">安装基础环境</button><button id="bootstrap-accuracy-worker" type="button">下载并校验全部模型（支持无卡）</button></div>
         <div id="cloud-worker-status" class="model-status">选择“云算力最高精度”后可连接服务器</div>
         <div class="inline-config-save"><div><b>云算力配置</b><small>保存运行模式、SSH、程序目录与数据盘目录</small></div><button id="save-cloud-settings" type="button">保存云算力配置</button><span id="cloud-save-status"></span></div>
       </div>
@@ -174,6 +174,7 @@
         <div class="overall-progress-title"><b>总任务进度</b><strong id="overall-progress-percent">0%</strong></div>
         <div class="progress overall-progress"><i id="overall-progress-bar"></i></div>
         <div id="overall-progress-summary" class="muted">尚无任务</div>
+        <div id="concurrency-summary" class="concurrency-summary">云 GPU：一次执行 1 个任务</div>
       </div>
       <div class="task-toolbar">
         <div class="task-action-group"><span>创建与开始</span><button id="stage-cloud" type="button">预上传当前所选文件</button><button id="start-all-staged-jobs">开始已预上传任务</button></div>
@@ -183,6 +184,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.19.1"></script>
+  <script src="/static/app.js?v=1.19.2"></script>
 </body>
 </html>

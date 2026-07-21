@@ -138,6 +138,8 @@ class CloudWorkerTests(unittest.TestCase):
 
         command = worker._exec.call_args.args[0]
         self.assertIn("accuracy-ready-v4", command)
+        self.assertIn("accuracy-downloaded-v4", command)
+        self.assertIn("ACCURACY_MODELS_DOWNLOADED_NO_GPU", command)
         self.assertIn("model.safetensors.index.json", command)
         self.assertIn("Model shard validation failed after repair", command)
         self.assertNotIn("hf_private_token", command)

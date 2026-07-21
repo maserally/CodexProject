@@ -15,7 +15,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .cloud_worker import CloudWhisperWorker
+from .cloud_worker import CLOUD_UPLOAD_CONCURRENCY, CloudWhisperWorker
 from .config import (
     ALLOW_LOCAL_OPEN,
     BASIC_AUTH_ENABLED,
@@ -52,7 +52,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.19.1")
+app = FastAPI(title="字幕翻译工作室", version="1.19.2")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -131,6 +131,9 @@ def runtime():
         "data_dir": str(DATA_DIR),
         "auth_enabled": BASIC_AUTH_ENABLED,
         "secret_policy": SECRET_POLICY,
+        "cloud_gpu_job_concurrency": 1,
+        "cloud_upload_concurrency": CLOUD_UPLOAD_CONCURRENCY,
+        "accuracy_parallel_models": 2,
     }
 
 
