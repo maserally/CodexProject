@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>字幕翻译工作室</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.19.0">
+  <link rel="stylesheet" href="/static/style.css?v=1.19.1">
 </head>
 <body>
   <main class="shell">
@@ -116,6 +116,7 @@
           <label>SSH 端口<input id="cloud-worker-port" type="number" min="1" max="65535" value="22"></label>
           <label>用户名<input id="cloud-worker-username" value="root"></label>
           <label>SSH 密码<input id="cloud-worker-password" type="password" autocomplete="off"><small class="field-help">使用 Windows DPAPI 加密保存在本机，不进入任务记录或 Git</small></label>
+          <label>Hugging Face Token<input id="cloud-worker-hf-token" type="password" autocomplete="off" placeholder="用于下载受限的 Cohere 官方权重"><small class="field-help">需先在 Cohere 官方模型页接受访问条件；Token 使用 DPAPI 加密保存在本机，只通过 SSH 标准输入临时传递</small></label>
           <label>私钥路径（与密码二选一）<input id="cloud-worker-key" placeholder="C:\Users\你\.ssh\id_ed25519"></label>
           <label>云端工作目录<input id="cloud-worker-dir" value="/root/subtitle-worker"></label>
           <label>云端模型数据盘目录<input id="cloud-worker-model-dir" value="/root/autodl-tmp/subtitle-models"><small class="field-help">全部识别模型只保存在数据盘；安装前要求至少 35GB 可用空间</small></label>
@@ -182,6 +183,6 @@
       <div id="jobs-list" class="jobs-list"><p class="muted">尚无任务</p></div>
     </section>
   </main>
-  <script src="/static/app.js?v=1.19.0"></script>
+  <script src="/static/app.js?v=1.19.1"></script>
 </body>
 </html>

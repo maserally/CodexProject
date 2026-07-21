@@ -438,7 +438,10 @@ class TaskManagementTests(unittest.TestCase):
                         "api_key": "keep-this-key",
                         "model": "old-model",
                     },
-                    "cloud_worker": {"password": "keep-this-password"},
+                    "cloud_worker": {
+                        "password": "keep-this-password",
+                        "huggingface_token": "keep-this-hf-token",
+                    },
                 }
                 save_provider_settings(first)
                 save_provider_settings(
@@ -449,7 +452,7 @@ class TaskManagementTests(unittest.TestCase):
                             "api_key": "",
                             "model": "new-model",
                         },
-                        "cloud_worker": {"password": ""},
+                        "cloud_worker": {"password": "", "huggingface_token": ""},
                     }
                 )
                 loaded = load_provider_settings(expose_secrets=True)
@@ -458,6 +461,12 @@ class TaskManagementTests(unittest.TestCase):
                 self.assertEqual(
                     loaded["cloud_worker"]["password"], "keep-this-password"
                 )
+                self.assertEqual(
+                    loaded["cloud_worker"]["huggingface_token"],
+                    "keep-this-hf-token",
+                )
+                raw = path.read_text(encoding="utf-8")
+                self.assertNotIn("keep-this-hf-token", raw)
 
     def test_resolve_provider_keys_falls_back_to_encrypted_local_settings(self):
         with tempfile.TemporaryDirectory() as folder:

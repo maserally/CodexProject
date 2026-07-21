@@ -81,6 +81,7 @@ def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, A
             "port": 22,
             "username": "root",
             "password": "",
+            "huggingface_token": "",
             "private_key_path": "",
             "remote_dir": "/root/subtitle-worker",
             "model_dir": "/root/autodl-tmp/subtitle-models",
@@ -113,6 +114,9 @@ def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, A
             defaults["cloud_worker"]["password"] = _unprotect(
                 str(worker.get("password", ""))
             )
+            defaults["cloud_worker"]["huggingface_token"] = _unprotect(
+                str(worker.get("huggingface_token", ""))
+            )
         except Exception:
             pass
     expose = SECURE_LOCAL_SECRETS if expose_secrets is None else expose_secrets
@@ -125,9 +129,12 @@ def load_provider_settings(*, expose_secrets: bool | None = None) -> dict[str, A
         else:
             defaults[name]["api_key"] = ""
     worker_password = str(defaults["cloud_worker"].get("password", ""))
+    worker_hf_token = str(defaults["cloud_worker"].get("huggingface_token", ""))
     defaults["cloud_worker"]["password_configured"] = bool(worker_password)
+    defaults["cloud_worker"]["huggingface_token_configured"] = bool(worker_hf_token)
     if not expose:
         defaults["cloud_worker"]["password"] = ""
+        defaults["cloud_worker"]["huggingface_token"] = ""
     return defaults
 
 
@@ -162,6 +169,11 @@ def save_provider_settings(settings: dict[str, Any]) -> Path:
             _protect(str(worker.get("password", "")))
             if str(worker.get("password", ""))
             else str(existing.get("cloud_worker", {}).get("password", ""))
+        ),
+        "huggingface_token": (
+            _protect(str(worker.get("huggingface_token", "")))
+            if str(worker.get("huggingface_token", ""))
+            else str(existing.get("cloud_worker", {}).get("huggingface_token", ""))
         ),
         "private_key_path": str(worker.get("private_key_path", "")).strip(),
         "remote_dir": str(worker.get("remote_dir", "/root/subtitle-worker")).strip(),

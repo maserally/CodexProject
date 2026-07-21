@@ -123,6 +123,7 @@ class CloudWhisperWorker:
         timeout: float | None = None,
         *,
         controllable: bool = False,
+        stdin_text: str | None = None,
     ) -> str:
         if not self.client:
             raise CloudWorkerError("云节点尚未连接")
@@ -140,6 +141,9 @@ class CloudWhisperWorker:
             # output files that do not exist yet.
             command = "setsid --wait bash -lc " + shlex.quote(inner)
         channel.exec_command(command)
+        if stdin_text is not None:
+            channel.sendall(stdin_text.encode("utf-8"))
+            channel.shutdown_write()
         output: list[str] = []
         errors: list[str] = []
         started = time.monotonic()
@@ -253,78 +257,165 @@ touch {remote}/.worker-ready-v3
             self.connect()
         remote = shlex.quote(self.settings.remote_dir)
         models = shlex.quote(self.settings.model_dir)
+        token_setup = ""
+        stdin_text = None
+        if self.settings.huggingface_token:
+            token_setup = 'IFS= read -r HF_TOKEN; export HF_TOKEN\n'
+            stdin_text = self.settings.huggingface_token + "\n"
         script = f"""set -euo pipefail
+{token_setup}export HF_HUB_DISABLE_TELEMETRY=1
 export OMP_NUM_THREADS=4
-mkdir -p {models}
-if [ -f {models}/.accuracy-ready-v3 ] \
-  && [ -f {models}/weights/Qwen3-ASR-1.7B/config.json ] \
-  && [ -f {models}/weights/Qwen3-ForcedAligner-0.6B/config.json ] \
-  && [ -f {models}/weights/cohere-transcribe-03-2026/config.json ] \
-  && [ -f {models}/weights/faster-whisper-large-v3/model.bin ]; then
-  echo "Accuracy ensemble already installed in {models}"
+models_root={models}
+mkdir -p "$models_root"
+exec 9>"$models_root/.accuracy-install.lock"
+if ! flock -w 7200 9; then
+  echo "Timed out waiting for the accuracy-model installer lock" >&2
+  exit 25
+fi
+validate_transformer() {{
+  python3 - "$1" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+if not (root / "config.json").is_file():
+    raise SystemExit(1)
+direct = (root / "model.safetensors", root / "pytorch_model.bin")
+if any(path.is_file() and path.stat().st_size > 0 for path in direct):
+    raise SystemExit(0)
+indexes = (root / "model.safetensors.index.json", root / "pytorch_model.bin.index.json")
+for index in indexes:
+    if not index.is_file():
+        continue
+    try:
+        weight_map = json.loads(index.read_text(encoding="utf-8")).get("weight_map", {{}})
+        shards = {{str(name) for name in weight_map.values()}}
+    except (OSError, ValueError, TypeError):
+        raise SystemExit(1)
+    if shards and all((root / name).is_file() and (root / name).stat().st_size > 0 for name in shards):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}}
+accuracy_models_complete() {{
+  validate_transformer "$models_root/weights/Qwen3-ASR-1.7B" \
+    && validate_transformer "$models_root/weights/Qwen3-ForcedAligner-0.6B" \
+    && validate_transformer "$models_root/weights/cohere-transcribe-03-2026" \
+    && [ -s "$models_root/weights/faster-whisper-large-v3/model.bin" ]
+}}
+if [ -f "$models_root/.accuracy-ready-v4" ] && accuracy_models_complete; then
+  echo "Accuracy ensemble already installed and shard-verified in $models_root"
   exit 0
 fi
+rm -f "$models_root/.accuracy-ready-v3" "$models_root/.accuracy-ready-v4"
+mkdir -p "$models_root/weights"
 available_kb=$(df -Pk {models} | awk 'NR==2 {{print $4}}')
-if [ -z "$available_kb" ] || [ "$available_kb" -lt 36700160 ]; then
-  echo "Accuracy models require at least 35 GB free in {models}; available_kb=${{available_kb:-unknown}}" >&2
+existing_kb=$(du -sk "$models_root/weights" 2>/dev/null | awk '{{print $1}}')
+minimum_kb=36700160
+if [ "${{existing_kb:-0}}" -ge 1048576 ]; then minimum_kb=8388608; fi
+if [ -z "$available_kb" ] || [ "$available_kb" -lt "$minimum_kb" ]; then
+  echo "Accuracy models do not have enough repair/download space in $models_root; required_kb=$minimum_kb available_kb=${{available_kb:-unknown}}" >&2
   exit 23
 fi
-mkdir -p {models}/envs {models}/weights {models}/manifests {models}/tmp
-export TMPDIR={models}/tmp
-if [ ! -x {models}/envs/qwen/bin/python ]; then
-  python3 -m venv --system-site-packages {models}/envs/qwen
+mkdir -p "$models_root/envs" "$models_root/weights" "$models_root/manifests" "$models_root/tmp"
+export TMPDIR="$models_root/tmp"
+if [ ! -x "$models_root/envs/qwen/bin/python" ]; then
+  python3 -m venv --system-site-packages "$models_root/envs/qwen"
 fi
-if [ ! -x {models}/envs/cohere/bin/python ]; then
-  python3 -m venv --system-site-packages {models}/envs/cohere
+if [ ! -x "$models_root/envs/cohere/bin/python" ]; then
+  python3 -m venv --system-site-packages "$models_root/envs/cohere"
 fi
 (
-  {models}/envs/qwen/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U pip \
-    || {models}/envs/qwen/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U pip
-  {models}/envs/qwen/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U qwen-asr modelscope soundfile nagisa soynlp \
-    || {models}/envs/qwen/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U qwen-asr modelscope soundfile nagisa soynlp
+  "$models_root/envs/qwen/bin/python" -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U pip \
+    || "$models_root/envs/qwen/bin/python" -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U pip
+  "$models_root/envs/qwen/bin/python" -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U qwen-asr modelscope huggingface_hub hf_xet soundfile nagisa soynlp \
+    || "$models_root/envs/qwen/bin/python" -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U qwen-asr modelscope huggingface_hub hf_xet soundfile nagisa soynlp
 ) & qwen_pip=$!
 (
-  {models}/envs/cohere/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U pip \
-    || {models}/envs/cohere/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U pip
-  {models}/envs/cohere/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U 'transformers>=5.4.0' accelerate sentencepiece protobuf soundfile librosa huggingface_hub hf_xet modelscope \
-    || {models}/envs/cohere/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U 'transformers>=5.4.0' accelerate sentencepiece protobuf soundfile librosa huggingface_hub hf_xet modelscope
+  "$models_root/envs/cohere/bin/python" -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U pip \
+    || "$models_root/envs/cohere/bin/python" -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U pip
+  "$models_root/envs/cohere/bin/python" -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -U 'transformers>=5.4.0' accelerate sentencepiece protobuf soundfile librosa huggingface_hub hf_xet modelscope \
+    || "$models_root/envs/cohere/bin/python" -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com -U 'transformers>=5.4.0' accelerate sentencepiece protobuf soundfile librosa huggingface_hub hf_xet modelscope
 ) & cohere_pip=$!
-wait "$qwen_pip"
-wait "$cohere_pip"
+set +e
+wait "$qwen_pip"; qwen_pip_status=$?
+wait "$cohere_pip"; cohere_pip_status=$?
+set -e
+if [ "$qwen_pip_status" -ne 0 ] || [ "$cohere_pip_status" -ne 0 ]; then
+  echo "Python dependency installation failed: qwen=$qwen_pip_status cohere=$cohere_pip_status" >&2
+  exit 27
+fi
+download_qwen_model() {{
+  repo="$1"
+  target="$2"
+  "$models_root/envs/qwen/bin/modelscope" download --model "$repo" --local_dir "$target" || true
+  if ! validate_transformer "$target"; then
+    HF_ENDPOINT=https://hf-mirror.com HF_HUB_DOWNLOAD_TIMEOUT=600 \
+      "$models_root/envs/qwen/bin/hf" download "$repo" --local-dir "$target"
+  fi
+  validate_transformer "$target"
+}}
+download_cohere_model() {{
+  target="$models_root/weights/cohere-transcribe-03-2026"
+  "$models_root/envs/cohere/bin/modelscope" download --model CohereLabs/cohere-transcribe-03-2026 --local_dir "$target" || true
+  if ! validate_transformer "$target"; then
+    HF_ENDPOINT=https://hf-mirror.com HF_HUB_DOWNLOAD_TIMEOUT=600 \
+      "$models_root/envs/cohere/bin/hf" download CohereLabs/cohere-transcribe-03-2026 --local-dir "$target"
+  fi
+  validate_transformer "$target"
+}}
 (
-  [ -f {models}/weights/Qwen3-ASR-1.7B/config.json ] || {models}/envs/qwen/bin/modelscope download --model Qwen/Qwen3-ASR-1.7B --local_dir {models}/weights/Qwen3-ASR-1.7B
+  validate_transformer "$models_root/weights/Qwen3-ASR-1.7B" \
+    || download_qwen_model Qwen/Qwen3-ASR-1.7B "$models_root/weights/Qwen3-ASR-1.7B"
 ) & qwen_model=$!
 (
-  [ -f {models}/weights/Qwen3-ForcedAligner-0.6B/config.json ] || {models}/envs/qwen/bin/modelscope download --model Qwen/Qwen3-ForcedAligner-0.6B --local_dir {models}/weights/Qwen3-ForcedAligner-0.6B
+  validate_transformer "$models_root/weights/Qwen3-ForcedAligner-0.6B" \
+    || download_qwen_model Qwen/Qwen3-ForcedAligner-0.6B "$models_root/weights/Qwen3-ForcedAligner-0.6B"
 ) & align_model=$!
 (
-  if [ ! -f {models}/weights/cohere-transcribe-03-2026/config.json ]; then
-    if ! {models}/envs/cohere/bin/modelscope download --model CohereLabs/cohere-transcribe-03-2026 --local_dir {models}/weights/cohere-transcribe-03-2026; then
-      export HF_ENDPOINT="https://hf-mirror.com"
-      export HF_HUB_DOWNLOAD_TIMEOUT=600
-      if ! {models}/envs/cohere/bin/hf download CohereLabs/cohere-transcribe-03-2026 --local-dir {models}/weights/cohere-transcribe-03-2026; then
-        echo "Cohere Transcribe failed through ModelScope and hf-mirror; the Hugging Face fallback also requires accepting the model terms and a logged-in token." >&2
-        exit 24
-      fi
-    fi
-  fi
+  validate_transformer "$models_root/weights/cohere-transcribe-03-2026" || download_cohere_model
 ) & cohere_model=$!
-wait "$qwen_model"
-wait "$align_model"
-wait "$cohere_model"
-if [ ! -f {models}/weights/faster-whisper-large-v3/model.bin ]; then
-  {models}/envs/qwen/bin/modelscope download --model keepitsimple/faster-whisper-large-v3 --local_dir {models}/weights/faster-whisper-large-v3
+set +e
+wait "$qwen_model"; qwen_status=$?
+wait "$align_model"; align_status=$?
+wait "$cohere_model"; cohere_status=$?
+set -e
+if [ "$qwen_status" -ne 0 ] || [ "$align_status" -ne 0 ] || [ "$cohere_status" -ne 0 ]; then
+  echo "Model repair failed: qwen=$qwen_status aligner=$align_status cohere=$cohere_status. Cohere may require accepted model terms and an authenticated Hugging Face token." >&2
+  exit 24
 fi
+if [ ! -s "$models_root/weights/faster-whisper-large-v3/model.bin" ]; then
+  "$models_root/envs/qwen/bin/modelscope" download --model keepitsimple/faster-whisper-large-v3 --local_dir "$models_root/weights/faster-whisper-large-v3"
+fi
+accuracy_models_complete || {{ echo "Model shard validation failed after repair" >&2; exit 26; }}
 for name in Qwen3-ASR-1.7B Qwen3-ForcedAligner-0.6B cohere-transcribe-03-2026; do
-  (cd {models}/weights/$name && find . -type f -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum > {models}/manifests/$name.sha256)
+  (cd "$models_root/weights/$name" && find . -type f -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum > "$models_root/manifests/$name.sha256")
 done
-(cd {models}/weights/faster-whisper-large-v3 && find . -type f -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum > {models}/manifests/faster-whisper-large-v3.sha256)
-{models}/envs/qwen/bin/python -c 'import torch, qwen_asr; assert torch.cuda.is_available()'
-{models}/envs/cohere/bin/python -c 'import torch, transformers; assert torch.cuda.is_available(); print(transformers.__version__)'
-touch {models}/.accuracy-ready-v3
-df -h {models}
+(cd "$models_root/weights/faster-whisper-large-v3" && find . -type f -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum > "$models_root/manifests/faster-whisper-large-v3.sha256")
+"$models_root/envs/qwen/bin/python" - "$models_root/weights/Qwen3-ASR-1.7B" <<'PY'
+import sys
+import torch
+from qwen_asr import Qwen3ASRModel
+model = Qwen3ASRModel.from_pretrained(sys.argv[1], dtype=torch.bfloat16, device_map="cuda:0", max_inference_batch_size=1, max_new_tokens=8)
+del model
+torch.cuda.empty_cache()
+PY
+"$models_root/envs/cohere/bin/python" - "$models_root/weights/cohere-transcribe-03-2026" <<'PY'
+import sys
+import torch
+from transformers import AutoProcessor, CohereAsrForConditionalGeneration
+AutoProcessor.from_pretrained(sys.argv[1], local_files_only=True)
+model = CohereAsrForConditionalGeneration.from_pretrained(sys.argv[1], local_files_only=True, dtype=torch.bfloat16, device_map="cuda:0")
+del model
+torch.cuda.empty_cache()
+PY
+touch "$models_root/.accuracy-ready-v4"
+df -h "$models_root"
 """
-        output = self._exec("bash -lc " + shlex.quote(script), timeout=7200)
+        output = self._exec(
+            "bash -lc " + shlex.quote(script), timeout=7200, stdin_text=stdin_text
+        )
         return {
             "output": output.strip(),
             "remote_dir": self.settings.remote_dir,

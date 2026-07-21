@@ -23,6 +23,7 @@ class CloudWorkerSettings(BaseModel):
     port: int = Field(default=22, ge=1, le=65535)
     username: str = "root"
     password: str = ""
+    huggingface_token: str = ""
     private_key_path: str = ""
     remote_dir: str = "/root/subtitle-worker"
     model_dir: str = "/root/autodl-tmp/subtitle-models"

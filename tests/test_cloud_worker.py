@@ -83,9 +83,16 @@ class CloudWorkerTests(unittest.TestCase):
     def test_controllable_remote_command_waits_for_setsid_child(self):
         class FakeChannel:
             command = ""
+            stdin = b""
 
             def exec_command(self, command):
                 self.command = command
+
+            def sendall(self, data):
+                self.stdin += data
+
+            def shutdown_write(self):
+                pass
 
             def exit_status_ready(self):
                 return True
@@ -115,6 +122,26 @@ class CloudWorkerTests(unittest.TestCase):
         worker._exec("python task.py", controllable=True)
 
         self.assertIn("setsid --wait bash -lc", channel.command)
+
+    def test_accuracy_bootstrap_validates_shards_and_sends_hf_token_via_stdin(self):
+        worker = CloudWhisperWorker(
+            CloudWorkerSettings(
+                enabled=True,
+                host="gpu.example.com",
+                huggingface_token="hf_private_token",
+            )
+        )
+        worker.client = object()
+        worker._exec = MagicMock(return_value="ready")
+
+        worker.bootstrap_accuracy()
+
+        command = worker._exec.call_args.args[0]
+        self.assertIn("accuracy-ready-v4", command)
+        self.assertIn("model.safetensors.index.json", command)
+        self.assertIn("Model shard validation failed after repair", command)
+        self.assertNotIn("hf_private_token", command)
+        self.assertEqual(worker._exec.call_args.kwargs["stdin_text"], "hf_private_token\n")
 
     def test_missing_remote_result_has_a_clear_worker_error(self):
         worker = object.__new__(CloudWhisperWorker)
