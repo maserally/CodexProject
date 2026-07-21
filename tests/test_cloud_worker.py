@@ -145,6 +145,21 @@ class CloudWorkerTests(unittest.TestCase):
         self.assertNotIn("hf_private_token", command)
         self.assertEqual(worker._exec.call_args.kwargs["stdin_text"], "hf_private_token\n")
 
+    def test_base_bootstrap_defers_cuda_assertion_when_no_gpu_is_attached(self):
+        worker = CloudWhisperWorker(
+            CloudWorkerSettings(enabled=True, host="gpu.example.com")
+        )
+        worker.client = object()
+        worker._exec = MagicMock(return_value="WORKER_INSTALLED_NO_GPU\n")
+
+        result = worker.bootstrap()
+
+        command = worker._exec.call_args.args[0]
+        self.assertIn("nvidia-smi -L", command)
+        self.assertIn("WORKER_INSTALLED_NO_GPU", command)
+        self.assertIn("worker-ready-v4", command)
+        self.assertFalse(result["gpu_verified"])
+
     def test_missing_remote_result_has_a_clear_worker_error(self):
         worker = object.__new__(CloudWhisperWorker)
         worker.sftp = type(

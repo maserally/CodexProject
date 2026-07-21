@@ -239,18 +239,29 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   if [ "$(id -u)" = 0 ]; then apt-get update && apt-get install -y ffmpeg; else sudo -n apt-get update && sudo -n apt-get install -y ffmpeg; fi
 fi
 mkdir -p {remote}/studio
-if [ ! -f {remote}/.worker-ready-v3 ]; then
+if [ ! -f {remote}/.worker-ready-v4 ]; then
   if [ ! -x {remote}/.venv/bin/python ]; then python3 -m venv --system-site-packages {remote}/.venv; fi
   {remote}/.venv/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn --upgrade pip \
     || {remote}/.venv/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com --upgrade pip
   {remote}/.venv/bin/python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn numpy soundfile openai-whisper faster-whisper transformers \
     || {remote}/.venv/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple --trusted-host mirrors.aliyun.com numpy soundfile openai-whisper faster-whisper transformers
 fi
-{remote}/.venv/bin/python -c 'import torch, whisper; print("torch=" + torch.__version__); print("cuda=" + str(torch.cuda.is_available())); assert torch.cuda.is_available(), "云节点 PyTorch 未启用 CUDA，请更换带 CUDA/PyTorch 的 GPU 镜像"'
-touch {remote}/.worker-ready-v3
+{remote}/.venv/bin/python -c 'import torch, whisper; print("torch=" + torch.__version__); print("cuda=" + str(torch.cuda.is_available()))'
+if nvidia-smi -L >/dev/null 2>&1; then
+  {remote}/.venv/bin/python -c 'import torch; assert torch.cuda.is_available(), "检测到 GPU，但当前 PyTorch 无法使用 CUDA；请更换 CUDA/PyTorch GPU 镜像"'
+  echo "WORKER_GPU_VERIFIED"
+else
+  echo "WORKER_INSTALLED_NO_GPU"
+  echo "Base environment installed; CUDA verification is deferred until GPU startup"
+fi
+touch {remote}/.worker-ready-v4
 """
         output = self._exec("bash -lc " + shlex.quote(script), timeout=1800)
-        return {"output": output.strip(), "remote_dir": self.settings.remote_dir}
+        return {
+            "output": output.strip(),
+            "remote_dir": self.settings.remote_dir,
+            "gpu_verified": "WORKER_GPU_VERIFIED" in output,
+        }
 
     def bootstrap_accuracy(self) -> dict[str, str]:
         if not self.client:
@@ -309,7 +320,7 @@ if [ -f "$models_root/.accuracy-ready-v4" ] && accuracy_models_complete; then
   exit 0
 fi
 gpu_available=0
-if python3 -c 'import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
+if {remote}/.venv/bin/python -c 'import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
   gpu_available=1
 fi
 if [ "$gpu_available" -eq 0 ] && [ -f "$models_root/.accuracy-downloaded-v4" ] && accuracy_models_complete; then
