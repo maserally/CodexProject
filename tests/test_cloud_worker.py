@@ -1,13 +1,20 @@
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from studio.cloud_worker import CloudWhisperWorker, CloudWorkerError, _validated
-from studio.main import app
+from studio.main import (
+    CLOUD_SETUP_LOCK,
+    CLOUD_SETUP_OPERATIONS,
+    _cloud_setup_snapshot,
+    app,
+    start_accuracy_bootstrap,
+)
 from studio.runner import JobState
-from studio.schemas import CloudWorkerSettings, JobOptions
+from studio.schemas import CloudWorkerRequest, CloudWorkerSettings, JobOptions
 from studio.settings_store import load_provider_settings, save_provider_settings
 
 
@@ -160,6 +167,49 @@ class CloudWorkerTests(unittest.TestCase):
         self.assertIn("worker-ready-v4", command)
         self.assertFalse(result["gpu_verified"])
 
+    def test_background_accuracy_setup_streams_progress_and_completes(self):
+        class FakeWorker:
+            def __init__(self, _settings, logger=None):
+                self.logger = logger or (lambda _message: None)
+
+            def connect(self):
+                pass
+
+            def bootstrap(self):
+                self.logger("基础环境 100%")
+                return {"gpu_verified": False}
+
+            def bootstrap_accuracy(self):
+                self.logger("model.safetensors 37%")
+                self.logger("model.safetensors 100%")
+                return {"gpu_verified": False, "model_dir": "/models"}
+
+            def close(self):
+                pass
+
+        with CLOUD_SETUP_LOCK:
+            CLOUD_SETUP_OPERATIONS.clear()
+        with patch("studio.main.CloudWhisperWorker", FakeWorker):
+            started = start_accuracy_bootstrap(
+                CloudWorkerRequest(
+                    cloud_worker=CloudWorkerSettings(
+                        enabled=True, host="gpu.example.com"
+                    )
+                )
+            )
+            deadline = time.time() + 2
+            operation = None
+            while time.time() < deadline:
+                operation = _cloud_setup_snapshot(started["operation_id"])
+                if operation and operation["status"] != "running":
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual(operation["status"], "completed")
+        self.assertEqual(operation["progress"], 1.0)
+        self.assertIn("model.safetensors 100%", operation["logs"])
+        self.assertIn("等待 GPU", operation["stage"])
+
     def test_missing_remote_result_has_a_clear_worker_error(self):
         worker = object.__new__(CloudWhisperWorker)
         worker.sftp = type(
@@ -258,6 +308,9 @@ class CloudWorkerTests(unittest.TestCase):
         paths = {route.path for route in app.routes}
         self.assertIn("/api/cloud-worker/test", paths)
         self.assertIn("/api/cloud-worker/bootstrap", paths)
+        self.assertIn("/api/cloud-worker/bootstrap-accuracy/start", paths)
+        self.assertIn("/api/cloud-worker/bootstrap-accuracy/active", paths)
+        self.assertIn("/api/cloud-worker/bootstrap-accuracy/status/{operation_id}", paths)
 
 
 if __name__ == "__main__":

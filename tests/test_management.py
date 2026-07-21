@@ -364,6 +364,8 @@ class TaskManagementTests(unittest.TestCase):
         self.assertIn('id="retry-all-failed-jobs"', html)
         self.assertIn('id="delete-all-jobs"', html)
         self.assertIn("支持无卡", html)
+        self.assertIn('id="cloud-setup-logs"', html)
+        self.assertIn("monitorCloudSetup", script)
         self.assertIn("renderOverallProgress(data.jobs)", script)
         self.assertIn("taskDisplayState", script)
         self.assertIn("排队等待 GPU", script)

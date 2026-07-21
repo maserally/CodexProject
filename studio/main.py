@@ -8,6 +8,9 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
+import time
+import uuid
 from pathlib import Path
 
 import aiofiles
@@ -52,7 +55,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.19.3")
+app = FastAPI(title="字幕翻译工作室", version="1.19.4")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -60,6 +63,9 @@ VIDEO_EXTENSIONS = {
 }
 MAX_BATCH_FILES = 500
 MAINTENANCE_LOCK = DATA_DIR / "maintenance.lock"
+CLOUD_SETUP_LOCK = threading.Lock()
+CLOUD_SETUP_OPERATIONS: dict[str, dict] = {}
+CLOUD_SETUP_LATEST_ID = ""
 
 
 @app.middleware("http")
@@ -447,6 +453,112 @@ def _cleanup_cloud_job(job):
         return f"云端临时目录未确认清理：{exc}"
     finally:
         worker.close()
+
+
+def _cloud_setup_snapshot(operation_id: str):
+    with CLOUD_SETUP_LOCK:
+        operation = CLOUD_SETUP_OPERATIONS.get(operation_id)
+        if not operation:
+            return None
+        return {
+            **operation,
+            "logs": list(operation.get("logs", [])),
+            "result": dict(operation.get("result", {})),
+        }
+
+
+def _cloud_setup_log(operation_id: str, message: str):
+    clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(message)).strip()
+    if not clean:
+        return
+    percentages = re.findall(r"(?<!\d)(\d{1,3})%", clean)
+    with CLOUD_SETUP_LOCK:
+        operation = CLOUD_SETUP_OPERATIONS.get(operation_id)
+        if not operation:
+            return
+        operation["logs"].append(clean[-1000:])
+        operation["logs"] = operation["logs"][-500:]
+        operation["updated_at"] = time.time()
+        if percentages:
+            operation["progress"] = min(0.99, int(percentages[-1]) / 100)
+
+
+@app.post("/api/cloud-worker/bootstrap-accuracy/start")
+def start_accuracy_bootstrap(request: CloudWorkerRequest):
+    global CLOUD_SETUP_LATEST_ID
+    with CLOUD_SETUP_LOCK:
+        for operation_id, operation in CLOUD_SETUP_OPERATIONS.items():
+            if operation.get("status") == "running":
+                return {"ok": True, "operation_id": operation_id, "reused": True}
+        operation_id = uuid.uuid4().hex[:12]
+        CLOUD_SETUP_OPERATIONS[operation_id] = {
+            "id": operation_id,
+            "status": "running",
+            "stage": "准备连接云节点",
+            "progress": 0.0,
+            "logs": [],
+            "error": "",
+            "result": {},
+            "updated_at": time.time(),
+        }
+        CLOUD_SETUP_LATEST_ID = operation_id
+
+    def run():
+        worker = CloudWhisperWorker(
+            request.cloud_worker,
+            logger=lambda message: _cloud_setup_log(operation_id, message),
+        )
+        try:
+            _cloud_setup_log(operation_id, "连接云节点并检查基础环境")
+            worker.connect()
+            with CLOUD_SETUP_LOCK:
+                CLOUD_SETUP_OPERATIONS[operation_id]["stage"] = "安装基础环境"
+            base = worker.bootstrap()
+            _cloud_setup_log(operation_id, "基础环境检查完成，开始下载和校验模型")
+            with CLOUD_SETUP_LOCK:
+                CLOUD_SETUP_OPERATIONS[operation_id]["stage"] = "下载与校验模型"
+                CLOUD_SETUP_OPERATIONS[operation_id]["progress"] = max(
+                    CLOUD_SETUP_OPERATIONS[operation_id]["progress"], 0.01
+                )
+            result = worker.bootstrap_accuracy()
+            with CLOUD_SETUP_LOCK:
+                operation = CLOUD_SETUP_OPERATIONS[operation_id]
+                operation["status"] = "completed"
+                operation["stage"] = (
+                    "模型已下载并通过 GPU 验收"
+                    if result.get("gpu_verified")
+                    else "模型已下载，等待 GPU 加载验收"
+                )
+                operation["progress"] = 1.0
+                operation["result"] = {**base, **result}
+                operation["updated_at"] = time.time()
+        except Exception as exc:
+            _cloud_setup_log(operation_id, f"安装失败：{exc}")
+            with CLOUD_SETUP_LOCK:
+                operation = CLOUD_SETUP_OPERATIONS[operation_id]
+                operation["status"] = "failed"
+                operation["stage"] = "模型安装失败"
+                operation["error"] = str(exc)
+                operation["updated_at"] = time.time()
+        finally:
+            worker.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True, "operation_id": operation_id, "reused": False}
+
+
+@app.get("/api/cloud-worker/bootstrap-accuracy/active")
+def active_accuracy_bootstrap():
+    operation = _cloud_setup_snapshot(CLOUD_SETUP_LATEST_ID) if CLOUD_SETUP_LATEST_ID else None
+    return {"operation": operation}
+
+
+@app.get("/api/cloud-worker/bootstrap-accuracy/status/{operation_id}")
+def accuracy_bootstrap_status(operation_id: str):
+    operation = _cloud_setup_snapshot(operation_id)
+    if not operation:
+        raise HTTPException(status_code=404, detail="模型安装记录不存在或程序已重启")
+    return operation
 
 
 def _cancel_keep_logs(job_id: str):
