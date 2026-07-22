@@ -87,6 +87,7 @@ class JobState:
     outputs: dict[str, str] = field(default_factory=dict)
     error: str = ""
     locked_config_groups: list[str] = field(default_factory=list)
+    model_progress: dict[str, dict[str, int | str]] = field(default_factory=dict)
     cloud_worker_settings: CloudWorkerSettings | None = field(default=None, repr=False)
     cloud_session: Any = field(default=None, repr=False)
 
@@ -106,6 +107,7 @@ class JobState:
             "outputs": self.outputs,
             "error": self.error,
             "locked_config_groups": list(self.locked_config_groups),
+            "model_progress": self.model_progress,
             "config_group_labels": CONFIG_GROUP_LABELS,
             "options": safe_options,
         }
@@ -147,6 +149,7 @@ class JobManager:
                     outputs=dict(data.get("outputs", {})),
                     error=error,
                     locked_config_groups=list(data.get("locked_config_groups", [])),
+                    model_progress=dict(data.get("model_progress", {})),
                 )
                 self.jobs[job.id] = job
             except Exception:
@@ -585,6 +588,18 @@ class JobManager:
         if status is not None:
             job.status = status
         if log:
+            for key, label, pattern in (
+                ("qwen", "Qwen3-ASR", r"Qwen3-ASR (\d+)/(\d+)"),
+                ("cohere", "Cohere", r"Cohere review (\d+)/(\d+)"),
+            ):
+                match = re.search(pattern, log)
+                if match:
+                    current, total = int(match.group(1)), int(match.group(2))
+                    job.model_progress[key] = {
+                        "label": label,
+                        "current": current,
+                        "total": total,
+                    }
             job.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {log}")
         job.updated_at = _now()
         self.persist(job)

@@ -21,6 +21,16 @@ CLOUD_UPLOAD_CONCURRENCY = max(
 CLOUD_UPLOAD_SLOTS = threading.BoundedSemaphore(CLOUD_UPLOAD_CONCURRENCY)
 
 
+def _accuracy_batch_sizes(total_memory_mib: int) -> tuple[int, int]:
+    if total_memory_mib >= 30000:
+        return 8, 6
+    if total_memory_mib >= 22000:
+        return 6, 4
+    if total_memory_mib >= 15000:
+        return 4, 3
+    return 2, 2
+
+
 class CloudWorkerError(RuntimeError):
     pass
 
@@ -124,6 +134,7 @@ class CloudWhisperWorker:
         *,
         controllable: bool = False,
         stdin_text: str | None = None,
+        stream_logs: bool = True,
     ) -> str:
         if not self.client:
             raise CloudWorkerError("云节点尚未连接")
@@ -154,13 +165,13 @@ class CloudWhisperWorker:
                     text = channel.recv(65536).decode("utf-8", errors="replace")
                     output.append(text)
                     for line in text.splitlines():
-                        if line.strip():
+                        if stream_logs and line.strip():
                             self.logger(line.strip())
                 if channel.recv_stderr_ready():
                     text = channel.recv_stderr(65536).decode("utf-8", errors="replace")
                     errors.append(text)
                     for line in text.splitlines():
-                        if line.strip():
+                        if stream_logs and line.strip():
                             self.logger(line.strip())
                 if timeout and time.monotonic() - started > timeout:
                     raise CloudWorkerError("云节点命令执行超时")
@@ -734,18 +745,33 @@ df -h "$models_root"
             "--events", remote_events, "--output", windows,
         ]), controllable=True)
 
+        memory_text = self._exec(
+            "nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1",
+            timeout=30,
+            stream_logs=False,
+        )
+        try:
+            total_memory_mib = int(memory_text.strip().splitlines()[0])
+        except (ValueError, IndexError):
+            total_memory_mib = 0
+        qwen_batch, cohere_batch = _accuracy_batch_sizes(total_memory_mib)
+        memory_label = f"{total_memory_mib / 1024:.1f}GB" if total_memory_mib else "未知容量"
+        self.logger(
+            f"GPU 动态批量：显存 {memory_label}，Qwen={qwen_batch}，Cohere={cohere_batch}；显存不足时自动降档"
+        )
+
         qwen_command = command([
             qwen_python, posixpath.join(scripts, "qwen_primary_stage.py"), raw_audio,
             "--events", remote_events, "--windows", windows, "--output", primary,
             "--model", posixpath.join(models, "weights", "Qwen3-ASR-1.7B"),
             "--language", language, "--speech-threshold", str(speech_threshold),
-            "--nonlexical-factor", str(nonlexical_factor), "--batch-size", "2",
+            "--nonlexical-factor", str(nonlexical_factor), "--batch-size", str(qwen_batch),
         ])
         cohere_command = command([
             cohere_python, posixpath.join(scripts, "cohere_review_stage.py"), enhanced_audio,
             "--input", windows, "--output", cohere,
             "--model", posixpath.join(models, "weights", "cohere-transcribe-03-2026"),
-            "--language", language, "--batch-size", "2", "--review-all",
+            "--language", language, "--batch-size", str(cohere_batch), "--review-all",
         ])
         self.logger("最高精度识别阶段 2/5：Qwen 原始音频与 Cohere 增强音频并行识别")
         parallel = (

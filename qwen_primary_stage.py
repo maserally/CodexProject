@@ -70,10 +70,20 @@ def main():
     if completed:
         print(f"Qwen3-ASR resumed={len(completed)} pending={len(pending)}", flush=True)
     language = LANGUAGE_NAMES[args.language]
-    for offset in range(0, len(pending), max(1, args.batch_size)):
-        batch = pending[offset : offset + max(1, args.batch_size)]
+    batch_size = max(1, args.batch_size)
+    offset = 0
+    while offset < len(pending):
+        batch = pending[offset : offset + batch_size]
         clips = [(audio_slice(audio, sample_rate, row["start"], row["end"]), sample_rate) for row in batch]
-        results = model.transcribe(audio=clips, language=[language] * len(clips))
+        try:
+            results = model.transcribe(audio=clips, language=[language] * len(clips))
+        except (torch.OutOfMemoryError, RuntimeError) as exc:
+            if "out of memory" not in str(exc).lower() or batch_size == 1:
+                raise
+            batch_size = max(1, batch_size // 2)
+            torch.cuda.empty_cache()
+            print(f"Qwen3-ASR 显存不足，批量自动降为 {batch_size}", flush=True)
+            continue
         for row, result in zip(batch, results):
             candidate = {
                 **row,
@@ -84,7 +94,8 @@ def main():
             candidate["needs_review"] = bool(candidate["review_reasons"])
             output.append(candidate)
         output.sort(key=lambda row: int(row.get("window_index", 0)))
-        done = len(completed) + min(offset + len(batch), len(pending))
+        offset += len(batch)
+        done = len(completed) + offset
         print(f"Qwen3-ASR {done}/{len(windows)}", flush=True)
         output_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
 

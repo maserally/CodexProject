@@ -20,6 +20,17 @@ from studio.settings_store import (
 
 
 class TaskManagementTests(unittest.TestCase):
+    def test_cloud_model_progress_is_structured_and_persisted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            manager = JobManager.__new__(JobManager)
+            job = JobState(id="progress-job", options=JobOptions(input_path="movie.mp4"))
+            with patch("studio.runner.JOBS_DIR", Path(folder)):
+                manager.update(job, log="Qwen3-ASR 8/20")
+                manager.update(job, log="Cohere review 20/20")
+            self.assertEqual(job.model_progress["qwen"]["current"], 8)
+            self.assertEqual(job.model_progress["cohere"]["current"], 20)
+            self.assertEqual(job.public()["model_progress"]["cohere"]["total"], 20)
+
     def test_provider_json_parser_accepts_extra_text_and_multiple_objects(self):
         self.assertEqual(
             _json_from_text('说明：```json\n{"zh":"第一句"}\n``` 完成'),

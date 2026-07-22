@@ -60,7 +60,8 @@ def main():
     ).eval()
     batch_size = max(1, args.batch_size)
     reviewed = 0
-    for offset in range(0, len(review_indices), batch_size):
+    offset = 0
+    while offset < len(review_indices):
         indices = review_indices[offset : offset + batch_size]
         clips = [
             audio[int(rows[index]["start"] * sample_rate) : int(rows[index]["end"] * sample_rate)]
@@ -76,8 +77,17 @@ def main():
         )
         audio_chunk_index = inputs.get("audio_chunk_index")
         inputs.to(model.device, dtype=model.dtype)
-        with torch.inference_mode():
-            output_ids = model.generate(**inputs, max_new_tokens=384, do_sample=False)
+        try:
+            with torch.inference_mode():
+                output_ids = model.generate(**inputs, max_new_tokens=384, do_sample=False)
+        except (torch.OutOfMemoryError, RuntimeError) as exc:
+            if "out of memory" not in str(exc).lower() or batch_size == 1:
+                raise
+            del inputs
+            batch_size = max(1, batch_size // 2)
+            torch.cuda.empty_cache()
+            print(f"Cohere 显存不足，批量自动降为 {batch_size}", flush=True)
+            continue
         decoded = processor.decode(
             output_ids,
             skip_special_tokens=True,
@@ -90,6 +100,7 @@ def main():
             row = rows[index]
             row["cohere_source"] = str(text or "").strip()
         reviewed += len(indices)
+        offset += len(indices)
         print(f"Cohere review {reviewed}/{len(review_indices)}", flush=True)
         output_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
