@@ -19,14 +19,21 @@ CLOUD_UPLOAD_CONCURRENCY = max(
     1, min(6, int(os.getenv("SUBTITLE_CLOUD_UPLOAD_CONCURRENCY", "3")))
 )
 CLOUD_UPLOAD_SLOTS = threading.BoundedSemaphore(CLOUD_UPLOAD_CONCURRENCY)
+CLOUD_GPU_CONCURRENCY = max(
+    1, min(2, int(os.getenv("SUBTITLE_CLOUD_GPU_CONCURRENCY", "2")))
+)
 
 
-def _accuracy_batch_sizes(total_memory_mib: int) -> tuple[int, int]:
-    if total_memory_mib >= 30000:
+def _accuracy_batch_sizes(
+    total_memory_mib: int,
+    parallel_jobs: int = CLOUD_GPU_CONCURRENCY,
+) -> tuple[int, int]:
+    memory_per_job = total_memory_mib // max(1, parallel_jobs)
+    if memory_per_job >= 30000:
         return 8, 6
-    if total_memory_mib >= 22000:
+    if memory_per_job >= 22000:
         return 6, 4
-    if total_memory_mib >= 15000:
+    if memory_per_job >= 15000:
         return 4, 3
     return 2, 2
 
@@ -757,7 +764,8 @@ df -h "$models_root"
         qwen_batch, cohere_batch = _accuracy_batch_sizes(total_memory_mib)
         memory_label = f"{total_memory_mib / 1024:.1f}GB" if total_memory_mib else "未知容量"
         self.logger(
-            f"GPU 动态批量：显存 {memory_label}，Qwen={qwen_batch}，Cohere={cohere_batch}；显存不足时自动降档"
+            f"GPU 动态批量：显存 {memory_label}，最多并行 {CLOUD_GPU_CONCURRENCY} 个任务，"
+            f"每任务 Qwen={qwen_batch}、Cohere={cohere_batch}；显存不足时自动降档"
         )
 
         qwen_command = command([

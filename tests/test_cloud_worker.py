@@ -25,9 +25,10 @@ from studio.settings_store import load_provider_settings, save_provider_settings
 
 class CloudWorkerTests(unittest.TestCase):
     def test_accuracy_batch_sizes_scale_with_gpu_memory(self):
-        self.assertEqual(_accuracy_batch_sizes(32760), (8, 6))
-        self.assertEqual(_accuracy_batch_sizes(24576), (6, 4))
-        self.assertEqual(_accuracy_batch_sizes(16384), (4, 3))
+        self.assertEqual(_accuracy_batch_sizes(32760), (4, 3))
+        self.assertEqual(_accuracy_batch_sizes(32760, parallel_jobs=1), (8, 6))
+        self.assertEqual(_accuracy_batch_sizes(24576), (2, 2))
+        self.assertEqual(_accuracy_batch_sizes(16384), (2, 2))
         self.assertEqual(_accuracy_batch_sizes(12288), (2, 2))
 
     def test_verified_audio_upload_uses_size_and_sha256_then_reuses_file(self):

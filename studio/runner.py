@@ -16,7 +16,7 @@ from typing import Any
 
 import psutil
 
-from .cloud_worker import CloudWhisperWorker
+from .cloud_worker import CLOUD_GPU_CONCURRENCY, CloudWhisperWorker
 from .config import DATA_DIR, ROOT
 from .languages import language_info
 from .quality import PROFILE_SETTINGS, finalize_cues, quality_summary
@@ -38,7 +38,7 @@ from .asr_context import attach_asr_reviews
 
 JOBS_DIR = DATA_DIR / "jobs"
 UPLOADS_DIR = DATA_DIR / "uploads"
-REMOTE_GPU_LOCK = threading.Lock()
+REMOTE_GPU_LOCK = threading.BoundedSemaphore(CLOUD_GPU_CONCURRENCY)
 LOCAL_GPU_LOCK = threading.Lock()
 CONFIG_GROUP_LABELS = {
     "recognition": "识别策略",
@@ -555,7 +555,11 @@ class JobManager:
             return
         if control.compute_lock is not None:
             self.release_compute(job)
-        self.update(job, stage=f"等待{label}资源", log=f"等待独占{label}资源，避免并行任务抢占显存")
+        if lock is REMOTE_GPU_LOCK:
+            wait_message = f"等待{label}资源 · 最多并行 {CLOUD_GPU_CONCURRENCY} 个任务"
+        else:
+            wait_message = f"等待独占{label}资源，避免并行任务抢占显存"
+        self.update(job, stage=f"等待{label}资源", log=wait_message)
         while not lock.acquire(timeout=0.25):
             self.checkpoint(job)
         control.compute_lock = lock
