@@ -4,9 +4,9 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from studio.main import _bulk_job_action, app
+from studio.main import _bulk_job_action, _resume_paused_job, app
 from studio.providers import supports_segment_timestamps
 from studio.remote_asr import _remote_packs
 from studio.runner import JobControl, JobManager, JobState
@@ -20,6 +20,23 @@ from studio.settings_store import (
 
 
 class TaskManagementTests(unittest.TestCase):
+    def test_individual_resume_recovers_paused_job_after_restart(self):
+        job = MagicMock()
+        job.options = JobOptions(input_path="movie.mp4")
+        fake_manager = MagicMock()
+        fake_manager.get.return_value = job
+        fake_manager.controls = {}
+        fake_manager.recover_paused.return_value = job
+        with (
+            patch("studio.main.manager", fake_manager),
+            patch(
+                "studio.main.load_provider_settings",
+                return_value={"cloud_worker": {"enabled": True, "host": "gpu.example.com"}},
+            ),
+        ):
+            self.assertIs(_resume_paused_job("paused-job"), job)
+        fake_manager.recover_paused.assert_called_once()
+
     def test_cloud_model_progress_is_structured_and_persisted(self):
         with tempfile.TemporaryDirectory() as folder:
             manager = JobManager.__new__(JobManager)

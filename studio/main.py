@@ -55,7 +55,7 @@ from .settings_store import (
 
 
 APP_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="字幕翻译工作室", version="1.19.5")
+app = FastAPI(title="字幕翻译工作室", version="1.19.6")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 VIDEO_EXTENSIONS = {
@@ -631,19 +631,12 @@ def pause_all_jobs():
 
 @app.post("/api/jobs/actions/resume-all")
 def resume_all_jobs():
-    saved = load_provider_settings(expose_secrets=True)
-    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
     targets = [job["id"] for job in manager.list() if job["status"] == "paused"]
     succeeded = []
     failed = []
     for job_id in targets:
         try:
-            job = manager.get(job_id)
-            job.options = resolve_provider_api_keys(job.options)
-            if job_id in manager.controls:
-                manager.resume(job_id)
-            else:
-                manager.recover_paused(job_id, worker if worker.enabled else None)
+            _resume_paused_job(job_id)
             succeeded.append(job_id)
         except (KeyError, RuntimeError) as exc:
             failed.append({"id": job_id, "error": str(exc)})
@@ -825,6 +818,18 @@ def _job_action(job_id: str, action: str):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+def _resume_paused_job(job_id: str):
+    job = manager.get(job_id)
+    if not job:
+        raise KeyError(job_id)
+    job.options = resolve_provider_api_keys(job.options)
+    if job_id in manager.controls:
+        return manager.resume(job_id)
+    saved = load_provider_settings(expose_secrets=True)
+    worker = CloudWorkerSettings.model_validate(saved.get("cloud_worker", {}))
+    return manager.recover_paused(job_id, worker if worker.enabled else None)
+
+
 @app.post("/api/jobs/{job_id}/pause")
 def pause_job(job_id: str):
     return _job_action(job_id, "pause")
@@ -832,7 +837,12 @@ def pause_job(job_id: str):
 
 @app.post("/api/jobs/{job_id}/resume")
 def resume_job(job_id: str):
-    return _job_action(job_id, "resume")
+    try:
+        return _resume_paused_job(job_id).public()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务不存在") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.patch("/api/jobs/{job_id}/settings")
